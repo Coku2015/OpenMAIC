@@ -73,6 +73,7 @@ function clearProviderEnv() {
   delete process.env.ALIDOCMIND_BASE_URL;
   delete process.env.BEDROCK_REGION;
   delete process.env.AWS_BEARER_TOKEN_BEDROCK;
+  delete process.env.TTS_QWEN_VOICE_CLONE_MODEL;
 }
 
 vi.mock('fs', async (importOriginal) => {
@@ -622,6 +623,41 @@ pdf:
       const { isServerTTSProviderDisabled } = await import('@/lib/server/provider-config');
       expect(isServerTTSProviderDisabled('openai-tts')).toBe(true);
       expect(isServerTTSProviderDisabled('qwen-tts')).toBe(false);
+    });
+  });
+
+  describe('Qwen TTS resolution', () => {
+    it('uses the provider default base URL when none is configured or supplied', async () => {
+      const { resolveTTSBaseUrl } = await import('@/lib/server/provider-config');
+      expect(resolveTTSBaseUrl('qwen-tts')).toBe('https://dashscope.aliyuncs.com/api/v1');
+    });
+
+    it('maps VC sentinels to the resolved model and rejects pin bypasses', async () => {
+      vi.stubEnv('TTS_QWEN_API_KEY', 'key');
+      vi.stubEnv('TTS_QWEN_MODELS', 'qwen3-tts-flash');
+      vi.stubEnv('TTS_QWEN_VOICE_CLONE_MODEL', 'operator-vc-model');
+      const { resolveTTSModel } = await import('@/lib/server/provider-config');
+      expect(resolveTTSModel('qwen-tts', 'qwen3-tts-vc-custom', 'clone-1')).toBe(
+        'operator-vc-model',
+      );
+      expect(() => resolveTTSModel('qwen-tts', 'qwen3-tts-flash-other', 'Cherry')).toThrow(
+        'not allowed',
+      );
+      expect(resolveTTSModel('qwen-tts', 'operator-vc-model', 'Cherry')).toBe('qwen3-tts-flash');
+    });
+
+    it('reads the VC override only from server-side resolution', async () => {
+      vi.stubEnv('TTS_QWEN_VOICE_CLONE_MODEL', 'operator-vc-model');
+      const { resolveQwenVoiceCloneModel } = await import('@/lib/server/provider-config');
+      expect(resolveQwenVoiceCloneModel()).toBe('operator-vc-model');
+    });
+
+    it('rejects catalog synthesis when the operator pins only the clone model', async () => {
+      vi.stubEnv('TTS_QWEN_API_KEY', 'key');
+      vi.stubEnv('TTS_QWEN_MODELS', 'operator-vc-model');
+      vi.stubEnv('TTS_QWEN_VOICE_CLONE_MODEL', 'operator-vc-model');
+      const { resolveTTSModel } = await import('@/lib/server/provider-config');
+      expect(() => resolveTTSModel('qwen-tts', undefined, 'Cherry')).toThrow('not allowed');
     });
   });
 

@@ -12,9 +12,13 @@ import { cn } from '@/lib/utils';
 import { useStageStore } from '@/lib/store/stage';
 import { useSettingsStore } from '@/lib/store/settings';
 import { useAgentRegistry } from '@/lib/orchestration/registry/store';
-import { getEnabledProvidersWithVoices } from '@/lib/audio/voice-resolver';
+import {
+  getEnabledProvidersWithVoices,
+  resolveNarratorVoiceForGeneration,
+} from '@/lib/audio/voice-resolver';
+import { isQwenCloneVoice, resolveTTSModelForVoice } from '@/lib/audio/constants';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
-import { useVoxCPMVoiceProfiles } from '@/lib/audio/voxcpm-voices';
+import { useAllVoiceProfiles } from '@/lib/audio/voxcpm-voices';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import {
   fetchSceneActions,
@@ -108,7 +112,7 @@ function GenerationPreviewContent() {
   // streaming card mid-stream, or by restoring a session that was already in review).
   // Combined with `reviewOutlineEnabled` to decide whether the post-stream timer fires.
   const outlineReviewIntentRef = useRef(false);
-  const { profiles: voxcpmProfiles } = useVoxCPMVoiceProfiles();
+  const { profiles: voiceProfiles } = useAllVoiceProfiles();
 
   const [session, setSession] = useState<GenerationSessionState | null>(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
@@ -869,17 +873,43 @@ function GenerationPreviewContent() {
           const getAvailableVoicesForGeneration = () => {
             const providers = getEnabledProvidersWithVoices(
               settings.ttsProvidersConfig,
-              voxcpmProfiles,
+              voiceProfiles,
             );
             return providers.flatMap((p) =>
-              p.voices.map((v) => ({
-                providerId: p.providerId,
-                voiceId: v.id,
-                voiceName: v.name,
-                voiceLanguage: v.language,
-              })),
+              p.voices.map((v) => {
+                const cloneModelGroup =
+                  p.providerId === 'qwen-tts' && isQwenCloneVoice(v.id)
+                    ? p.modelGroups.find((group) =>
+                        group.voices.some((groupVoice) => groupVoice.id === v.id),
+                      )
+                    : undefined;
+                const modelId = cloneModelGroup
+                  ? resolveTTSModelForVoice(p.providerId, v.id, cloneModelGroup.modelId)
+                  : undefined;
+                return {
+                  providerId: p.providerId,
+                  ...(modelId ? { modelId } : {}),
+                  voiceId: v.id,
+                  voiceName: v.name,
+                  voiceLanguage: v.language,
+                };
+              }),
             );
           };
+
+          // The user's global TTS voice is the narrator voice. Pass it along so
+          // the server pins the teacher agent to it instead of letting the LLM
+          // pick a different voice. Reuse the same resolution helpers as the
+          // advertised list: the model follows the voice, and only clones carry
+          // a model on the wire. An unusable global voice (disabled/unconfigured
+          // provider) is NOT pinned — the LLM then picks a working advertised
+          // voice and the narration fallback machinery stays alive.
+          const getNarratorVoiceForGeneration = () =>
+            resolveNarratorVoiceForGeneration(
+              settings.ttsProviderId,
+              settings.ttsVoice,
+              settings.ttsProvidersConfig[settings.ttsProviderId],
+            );
 
           const agentResp = await fetch('/api/generate/agent-profiles', {
             method: 'POST',
@@ -895,6 +925,7 @@ function GenerationPreviewContent() {
                 availableAvatars: allAvatars.map((a) => a.path),
                 avatarDescriptions: allAvatars.map((a) => ({ path: a.path, desc: a.desc })),
                 availableVoices: getAvailableVoicesForGeneration(),
+                narratorVoice: getNarratorVoiceForGeneration(),
               }),
             ),
             signal,

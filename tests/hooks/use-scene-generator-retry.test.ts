@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   pickNarratorAgent: vi.fn(),
   resolveAgentVoiceOptions: vi.fn(),
   listAgents: vi.fn(),
+  toastWarning: vi.fn(),
 }));
 
 vi.mock('@/lib/utils/model-config', () => ({
@@ -56,6 +57,8 @@ vi.mock('@/lib/orchestration/registry/store', () => ({
     }),
   },
 }));
+
+vi.mock('sonner', () => ({ toast: { warning: mocks.toastWarning } }));
 
 const mockFetch = vi.fn() as Mock;
 vi.stubGlobal('fetch', mockFetch);
@@ -115,6 +118,7 @@ describe('browser scene generation retry wrappers', () => {
     mocks.pickNarratorAgent.mockReturnValue(undefined);
     mocks.resolveAgentVoiceOptions.mockResolvedValue({});
     mocks.listAgents.mockReturnValue([]);
+    mocks.toastWarning.mockReset();
   });
 
   it('retries transient scene content HTTP failures before returning success', async () => {
@@ -292,6 +296,49 @@ describe('browser scene generation retry wrappers', () => {
         format: 'wav',
       }),
     );
+  });
+
+  it('falls back once from a missing narrator clone to the global voice', async () => {
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+    mocks.settingsState.mockReturnValue({
+      ...mocks.settingsState(),
+      ttsProviderId: 'qwen-tts',
+      ttsVoice: 'Cherry',
+      ttsProvidersConfig: {
+        'qwen-tts': { apiKey: 'tts-key', modelId: 'qwen3-tts-vc-2026-01-22' },
+      },
+    });
+    mocks.pickNarratorAgent.mockReturnValue({
+      id: 'teacher-missing-clone',
+      role: 'teacher',
+      voiceConfig: { providerId: 'qwen-tts', voiceId: 'deleted-clone-id' },
+    });
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(400, {
+          errorCode: 'QWEN_VC_VOICE_NOT_FOUND',
+          error: 'The cloned Qwen voice no longer exists.',
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { success: true, base64: btoa('fallback-audio'), format: 'wav' }),
+      );
+
+    await expect(
+      generateAndStoreTTS('request-fallback', 'Hello class', undefined, undefined, {
+        ...retryOptions,
+        maxRetries: 0,
+      }),
+    ).resolves.toBe('ast_audio_allocated');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const firstBody = JSON.parse(String(mockFetch.mock.calls[0][1]?.body));
+    const secondBody = JSON.parse(String(mockFetch.mock.calls[1][1]?.body));
+    expect(firstBody).toMatchObject({
+      ttsVoice: 'deleted-clone-id',
+      ttsModelId: 'qwen3-tts-vc-2026-01-22',
+    });
+    expect(secondBody).toMatchObject({ ttsVoice: 'Cherry', ttsModelId: 'qwen3-tts-flash' });
+    expect(mocks.toastWarning).toHaveBeenCalledOnce();
   });
 
   it('does not write Dexie when pool allocation fails', async () => {

@@ -18,7 +18,13 @@ import { getThinkingConfigKey, supportsConfigurableThinking } from '@/lib/ai/thi
 import type { TTSProviderId, ASRProviderId, BuiltInTTSProviderId } from '@/lib/audio/types';
 import type { AgentVoiceOverride } from '@/lib/audio/voice-resolver';
 import { isCustomTTSProvider, isCustomASRProvider } from '@/lib/audio/types';
-import { ASR_PROVIDERS, DEFAULT_TTS_VOICES, TTS_PROVIDERS } from '@/lib/audio/constants';
+import {
+  ASR_PROVIDERS,
+  DEFAULT_TTS_VOICES,
+  isQwenCatalogVoice,
+  isQwenVoiceCloneModel,
+  TTS_PROVIDERS,
+} from '@/lib/audio/constants';
 import { DEFAULT_VOXCPM_BACKEND, VOXCPM_MODEL_ID, VOXCPM_VLLM_MODEL_ID } from '@/lib/audio/voxcpm';
 import { PDF_PROVIDERS } from '@/lib/pdf/constants';
 import type { PDFProviderId } from '@/lib/pdf/types';
@@ -1033,10 +1039,39 @@ export const useSettingsStore = create<SettingsState>()(
             return {
               ttsProviderId: providerId,
               ...(shouldUpdateVoice && { ttsVoice: defaultVoice }),
+              ...(providerId === 'qwen-tts' &&
+              isQwenCatalogVoice(defaultVoice) &&
+              isQwenVoiceCloneModel(state.ttsProvidersConfig['qwen-tts']?.modelId)
+                ? {
+                    ttsProvidersConfig: {
+                      ...state.ttsProvidersConfig,
+                      'qwen-tts': {
+                        ...state.ttsProvidersConfig['qwen-tts'],
+                        modelId: TTS_PROVIDERS['qwen-tts'].defaultModelId,
+                      },
+                    },
+                  }
+                : {}),
             };
           }),
 
-        setTTSVoice: (voice) => set({ ttsVoice: voice }),
+        setTTSVoice: (voice) =>
+          set((state) => ({
+            ttsVoice: voice,
+            ...(state.ttsProviderId === 'qwen-tts' &&
+            isQwenCatalogVoice(voice) &&
+            isQwenVoiceCloneModel(state.ttsProvidersConfig['qwen-tts']?.modelId)
+              ? {
+                  ttsProvidersConfig: {
+                    ...state.ttsProvidersConfig,
+                    'qwen-tts': {
+                      ...state.ttsProvidersConfig['qwen-tts'],
+                      modelId: TTS_PROVIDERS['qwen-tts'].defaultModelId,
+                    },
+                  },
+                }
+              : {}),
+          })),
 
         setTTSSpeed: (speed) => set({ ttsSpeed: speed }),
 
