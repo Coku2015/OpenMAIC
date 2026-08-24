@@ -37,7 +37,14 @@ import { getCurrentModelConfig } from '@/lib/utils/model-config';
 import { isAssetPoolServerBacked } from '@/lib/media/asset-pool-config';
 import { getPersistenceRequestHeaders } from '@/lib/persistence/bootstrap';
 import { resolveSessionDocumentSources } from '@/lib/document/session-sources';
-import { fetchExtractionResponse } from '@/lib/document/extract-source';
+import {
+  computeConfigFingerprint,
+  createExtractionDeduplicator,
+  fetchExtractionWithCache,
+  resolveExpectedExtractor,
+  type ExtractionCacheDomain,
+} from '@/lib/document/extraction-cache';
+import { SUPPORTED_MEDIA_MIME_TYPES } from '@/lib/document/mime';
 import { MAX_VISION_IMAGES } from '@/lib/constants/generation';
 import {
   MAX_DOCUMENT_BUNDLE_FILES,
@@ -346,6 +353,10 @@ function GenerationPreviewContent() {
         // the two forms.
         const serverBacked = isAssetPoolServerBacked();
         const sortedDocumentSources = [...documentSources].sort((a, b) => a.order - b.order);
+        // K3 (in-run dedupe): sources with the same content digest AND the same
+        // expected extractor identity share ONE extraction, so two same-byte
+        // files under different names never both pay for the paid extraction.
+        const deduplicateExtraction = createExtractionDeduplicator();
         const parsedParts = await Promise.all(
           sortedDocumentSources.map(async (source): Promise<ParsedDocumentPart> => {
             const providerId = source.providerId || currentSession.pdfProviderId;
@@ -360,102 +371,151 @@ function GenerationPreviewContent() {
               }
             ).providerConfig;
             const providerConfig = currentSession.pdfProviderConfig || legacySourceConfig;
+            // The caller-supplied endpoint (fingerprinted into the cache key)
+            // and the derivation domain (L6: `alidocmind` exists in both the
+            // document and media registries at the same version, so the page —
+            // which knows which path a source takes — must discriminate them).
+            const sourceBaseUrl = providerConfig?.baseUrl?.trim() || undefined;
+            const sourceDomain: ExtractionCacheDomain =
+              source.mimeType && SUPPORTED_MEDIA_MIME_TYPES.includes(source.mimeType.toLowerCase())
+                ? 'media'
+                : 'doc';
+            // The config fingerprint feeds ONLY the in-run dedupe key below. A
+            // computation failure (Web Crypto unavailable) must never fail the
+            // extraction: the source falls back to un-deduped extraction, and
+            // the cache lookup/write paths recompute the fingerprint under
+            // their own degrade-to-miss guards (RFC #1153 part 1, M1).
+            let sourceConfigFingerprint: string | undefined;
+            try {
+              sourceConfigFingerprint = await computeConfigFingerprint(sourceBaseUrl);
+            } catch (error) {
+              log.warn(
+                'Config fingerprinting failed; skipping in-run dedupe for this source:',
+                error,
+              );
+            }
 
-            // Per-source form selection: asset-id JSON first when the pool is
-            // server-backed and the source has an id, with a per-source
-            // fallback to the legacy byte upload if that form fails for any
-            // reason (see `fetchExtractionResponse`).
-            const parseResponse = await fetchExtractionResponse({
-              serverBacked,
-              hasAssetId: Boolean(source.assetId),
-              logWarning: (message, ...args) => log.warn(message, ...args),
-              fetchers: {
-                submitAssetIdForm: async () => {
-                  // Server-backed pool: extract by the asset id allocated at
-                  // upload. The server resolves the original bytes from the
-                  // server asset store, so no bytes cross the wire.
-                  const persistenceHeaders = await getPersistenceRequestHeaders();
-                  return fetch('/api/extract-document', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', ...persistenceHeaders },
-                    body: JSON.stringify({
-                      assetId: source.assetId,
-                      fileName: source.name,
-                      mimeType: source.mimeType,
-                      providerId: providerId || undefined,
-                      apiKey: providerConfig?.apiKey?.trim() ? providerConfig.apiKey : undefined,
-                      baseUrl: providerConfig?.baseUrl?.trim() ? providerConfig.baseUrl : undefined,
-                      // AliDocMind uses AK/SK instead of a single apiKey.
-                      accessKeyId: providerConfig?.accessKeyId?.trim()
-                        ? providerConfig.accessKeyId
-                        : undefined,
-                      accessKeySecret: providerConfig?.accessKeySecret?.trim()
-                        ? providerConfig.accessKeySecret
-                        : undefined,
-                    }),
-                    signal,
-                  });
-                },
-                submitByteForm: async () => {
-                  // Browser-backed pool (or a legacy storageKey-only session,
-                  // or a fallback after a failed asset-id form): the server
-                  // cannot resolve a browser-side asset, so upload the bytes
-                  // exactly as before.
-                  const documentBlob = await loadDocumentBlob(source.storageKey);
-                  if (!documentBlob) {
-                    throw new Error(t('generation.courseMaterialLoadFailed'));
-                  }
+            // The extractor the route is expected to run under, resolved
+            // client-side. It feeds the extraction-cache lookup, which must
+            // happen BEFORE the extract API is called: the cache key is
+            // (content digest × domain × extractor identity × config
+            // fingerprint), and on a hit the rebuilt parse result skips the
+            // paid extraction entirely.
+            const expectedExtractor = source.contentDigest
+              ? resolveExpectedExtractor(source.mimeType ?? 'application/pdf', providerId)
+              : null;
 
-                  if (!(documentBlob instanceof Blob) || documentBlob.size === 0) {
-                    log.error('Invalid course material blob:', {
-                      source: source.name,
-                      type: typeof documentBlob,
-                      size: documentBlob instanceof Blob ? documentBlob.size : 'N/A',
+            // Cache lookup first; on a miss this runs the extract API (asset-id
+            // JSON form with a per-source fallback to the legacy byte upload,
+            // see `fetchExtractionResponse`) and caches the result best-effort.
+            const runExtraction = () =>
+              fetchExtractionWithCache({
+                serverBacked,
+                hasAssetId: Boolean(source.assetId),
+                logWarning: (message, ...args) => log.warn(message, ...args),
+                fetchers: {
+                  submitAssetIdForm: async () => {
+                    // Server-backed pool: extract by the asset id allocated at
+                    // upload. The server resolves the original bytes from the
+                    // server asset store, so no bytes cross the wire.
+                    const persistenceHeaders = await getPersistenceRequestHeaders();
+                    return fetch('/api/extract-document', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', ...persistenceHeaders },
+                      body: JSON.stringify({
+                        assetId: source.assetId,
+                        fileName: source.name,
+                        mimeType: source.mimeType,
+                        providerId: providerId || undefined,
+                        apiKey: providerConfig?.apiKey?.trim() ? providerConfig.apiKey : undefined,
+                        baseUrl: providerConfig?.baseUrl?.trim()
+                          ? providerConfig.baseUrl
+                          : undefined,
+                        // AliDocMind uses AK/SK instead of a single apiKey.
+                        accessKeyId: providerConfig?.accessKeyId?.trim()
+                          ? providerConfig.accessKeyId
+                          : undefined,
+                        accessKeySecret: providerConfig?.accessKeySecret?.trim()
+                          ? providerConfig.accessKeySecret
+                          : undefined,
+                      }),
+                      signal,
                     });
-                    throw new Error(t('generation.courseMaterialLoadFailed'));
-                  }
+                  },
+                  submitByteForm: async () => {
+                    // Browser-backed pool (or a legacy storageKey-only session,
+                    // or a fallback after a failed asset-id form): the server
+                    // cannot resolve a browser-side asset, so upload the bytes
+                    // exactly as before.
+                    const documentBlob = await loadDocumentBlob(source.storageKey);
+                    if (!documentBlob) {
+                      throw new Error(t('generation.courseMaterialLoadFailed'));
+                    }
 
-                  const documentFile = new File([documentBlob], source.name || 'document.pdf', {
-                    type: source.mimeType || documentBlob.type || 'application/pdf',
-                  });
+                    if (!(documentBlob instanceof Blob) || documentBlob.size === 0) {
+                      log.error('Invalid course material blob:', {
+                        source: source.name,
+                        type: typeof documentBlob,
+                        size: documentBlob instanceof Blob ? documentBlob.size : 'N/A',
+                      });
+                      throw new Error(t('generation.courseMaterialLoadFailed'));
+                    }
 
-                  const parseFormData = new FormData();
-                  parseFormData.append('file', documentFile);
-                  if (providerId) parseFormData.append('providerId', providerId);
-                  if (providerConfig?.apiKey?.trim()) {
-                    parseFormData.append('apiKey', providerConfig.apiKey);
-                  }
-                  if (providerConfig?.baseUrl?.trim()) {
-                    parseFormData.append('baseUrl', providerConfig.baseUrl);
-                  }
-                  // AliDocMind uses AK/SK instead of a single apiKey.
-                  if (providerConfig?.accessKeyId?.trim()) {
-                    parseFormData.append('accessKeyId', providerConfig.accessKeyId);
-                  }
-                  if (providerConfig?.accessKeySecret?.trim()) {
-                    parseFormData.append('accessKeySecret', providerConfig.accessKeySecret);
-                  }
+                    const documentFile = new File([documentBlob], source.name || 'document.pdf', {
+                      type: source.mimeType || documentBlob.type || 'application/pdf',
+                    });
 
-                  return fetch('/api/extract-document', {
-                    method: 'POST',
-                    body: parseFormData,
-                    signal,
-                  });
+                    const parseFormData = new FormData();
+                    parseFormData.append('file', documentFile);
+                    if (providerId) parseFormData.append('providerId', providerId);
+                    if (providerConfig?.apiKey?.trim()) {
+                      parseFormData.append('apiKey', providerConfig.apiKey);
+                    }
+                    if (providerConfig?.baseUrl?.trim()) {
+                      parseFormData.append('baseUrl', providerConfig.baseUrl);
+                    }
+                    // AliDocMind uses AK/SK instead of a single apiKey.
+                    if (providerConfig?.accessKeyId?.trim()) {
+                      parseFormData.append('accessKeyId', providerConfig.accessKeyId);
+                    }
+                    if (providerConfig?.accessKeySecret?.trim()) {
+                      parseFormData.append('accessKeySecret', providerConfig.accessKeySecret);
+                    }
+
+                    return fetch('/api/extract-document', {
+                      method: 'POST',
+                      body: parseFormData,
+                      signal,
+                    });
+                  },
                 },
-              },
-            });
+                contentDigest: source.contentDigest,
+                domain: sourceDomain,
+                extractorId: expectedExtractor?.extractorId,
+                extractorVersion: expectedExtractor?.extractorVersion,
+                baseUrl: sourceBaseUrl,
+                sourceDocAssetId: source.assetId,
+                parseFailedMessage: t('generation.courseMaterialParseFailed'),
+              }).then((outcome) => outcome.data);
+            // K3 (in-run dedupe): sources whose extraction cache key is
+            // identical (same content digest + domain + expected extractor +
+            // config fingerprint) share ONE extraction; two same-byte files
+            // never both pay, and per-source config differences never share.
+            const parseData =
+              source.contentDigest && expectedExtractor && sourceConfigFingerprint
+                ? await deduplicateExtraction.run(
+                    {
+                      contentDigest: source.contentDigest,
+                      domain: sourceDomain,
+                      extractorId: expectedExtractor.extractorId,
+                      extractorVersion: expectedExtractor.extractorVersion,
+                      configFingerprint: sourceConfigFingerprint,
+                    },
+                    runExtraction,
+                  )
+                : await runExtraction();
 
-            if (!parseResponse.ok) {
-              const errorData = await parseResponse.json();
-              throw new Error(errorData.error || t('generation.courseMaterialParseFailed'));
-            }
-
-            const parseResult = await parseResponse.json();
-            if (!parseResult.success || !parseResult.data) {
-              throw new Error(t('generation.courseMaterialParseFailed'));
-            }
-
-            const rawImages = parseResult.data.metadata?.pdfImages;
+            const rawImages = parseData.metadata?.pdfImages;
             const images = rawImages
               ? rawImages.map((img: ParsedDocumentResponseImage) => ({
                   id: img.id,
@@ -465,7 +525,7 @@ function GenerationPreviewContent() {
                   width: img.width,
                   height: img.height,
                 }))
-              : ((parseResult.data.images as string[] | undefined) ?? []).map((src, i) => ({
+              : ((parseData.images as string[] | undefined) ?? []).map((src, i) => ({
                   id: `img_${i + 1}`,
                   src,
                   pageNumber: 1,
@@ -481,9 +541,9 @@ function GenerationPreviewContent() {
                 order: source.order,
                 providerId,
               },
-              text: parseResult.data.text as string,
-              rawTextLength: (parseResult.data.text as string).length,
-              pageCount: parseResult.data.metadata?.pageCount,
+              text: parseData.text as string,
+              rawTextLength: (parseData.text as string).length,
+              pageCount: parseData.metadata?.pageCount,
               images,
             };
           }),
