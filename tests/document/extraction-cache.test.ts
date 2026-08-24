@@ -20,6 +20,7 @@ import {
   type InRunExtractionKey,
 } from '@/lib/document/extraction-cache';
 import type { ExtractSourceFetchers } from '@/lib/document/extract-source';
+import { setMaterialLibraryKVForTests } from '@/lib/materials/library';
 import type { AssetPoolStore } from '@/lib/media/asset-pool-config';
 import type { ParsedPdfContent } from '@/lib/types/pdf';
 
@@ -31,6 +32,12 @@ let MANAGED_FP: string;
 
 beforeAll(async () => {
   MANAGED_FP = await computeConfigFingerprint();
+  // A working library KV for the best-effort derivation-pointer recording that
+  // `fetchExtractionWithCache` now performs: with the browser store unavailable
+  // in node, the library would otherwise warn per call and pollute the
+  // console.warn-count assertions in the K5 suite below. Installed for the
+  // whole file (entries accumulate harmlessly; no test reads the library).
+  setMaterialLibraryKVForTests(new FakeKV());
 });
 
 /** The full cache key for the stable (no baseUrl) config bucket, as callers use it. */
@@ -69,6 +76,33 @@ function fixtureResult(): ParsedPdfContent {
       taskId: 'mineru-task-1',
     },
     tables: [{ page: 1, data: [['Tool', 'State']], caption: 'Inspection table' }],
+  };
+}
+
+/** A document-extraction result with `count` images, for probe-batching tests. */
+function manyImageResult(count: number): ParsedPdfContent {
+  const imageSrcs = Array.from({ length: count }, (_, index) => {
+    const dataUrl = `data:image/png;base64,${Buffer.from(`img-${index + 1}`).toString('base64')}`;
+    return dataUrl;
+  });
+  return {
+    text: '# Many images',
+    images: imageSrcs,
+    metadata: {
+      pageCount: count,
+      parser: 'mineru',
+      fileName: 'many-images.pdf',
+      fileSize: 4096,
+      mimeType: 'application/pdf',
+      imageMapping: Object.fromEntries(imageSrcs.map((src, index) => [`img_${index + 1}`, src])),
+      pdfImages: imageSrcs.map((src, index) => ({
+        id: `img_${index + 1}`,
+        src,
+        pageNumber: index + 1,
+      })),
+      taskId: 'mineru-task-many',
+    },
+    tables: [],
   };
 }
 
@@ -113,6 +147,7 @@ interface FakePoolHarness {
   put: ReturnType<typeof vi.fn>;
   resolve: ReturnType<typeof vi.fn>;
   remove: ReturnType<typeof vi.fn>;
+  exists: ReturnType<typeof vi.fn>;
 }
 
 function makePool(): FakePoolHarness {
@@ -131,6 +166,7 @@ function makePool(): FakePoolHarness {
   const remove = vi.fn(async (ref: string): Promise<void> => {
     blobs.delete(ref);
   });
+  const exists = vi.fn(async (ref: string): Promise<boolean> => blobs.has(ref));
   const pool: AssetPoolStore = {
     put: put as AssetPoolStore['put'],
     resolve: resolve as AssetPoolStore['resolve'],
@@ -138,9 +174,10 @@ function makePool(): FakePoolHarness {
     remove: remove as AssetPoolStore['remove'],
     replace: vi.fn(async () => undefined),
     release: vi.fn(async () => undefined),
+    exists: exists as AssetPoolStore['exists'],
     close: vi.fn(async () => undefined),
   };
-  return { pool, blobs, put, resolve, remove };
+  return { pool, blobs, put, resolve, remove, exists };
 }
 
 /** A fetch implementation serving the fake pool's `test://<assetId>` URLs. */
@@ -427,6 +464,97 @@ describe('writeExtractionCache', () => {
     expect(JSON.stringify(artifact)).not.toContain('data:image/');
   });
 
+  it('resolves to the derived images (extraction id → pool asset id) on success', async () => {
+    const kv = new FakeKV();
+    const harness = makePool();
+
+    const derived = await writeExtractionCache({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      sourceDocAssetId: 'ast_source_doc',
+      result: fixtureResult(),
+    });
+
+    // A server-backed caller awaits the write to learn the image asset ids
+    // without materializing image bytes (RFC #1153 part 2 B).
+    expect(derived.map((image) => image.id)).toEqual(['img_1', 'img_2']);
+    expect(derived.map((image) => image.assetId)).toEqual(['ast_test_0', 'ast_test_1']);
+  });
+
+  it('returns the ADOPTED record images when a same-key race supersedes the attempt (K3)', async () => {
+    const kv = new FakeKV();
+    const harness = makePool();
+
+    const first = await writeExtractionCache({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      result: fixtureResult(),
+    });
+    // A second write for the same key ingests its own assets, then adopts the
+    // existing record and releases them — the caller must receive the LIVE
+    // ids, not the released ones.
+    const second = await writeExtractionCache({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      result: fixtureResult(),
+    });
+
+    expect(second).toEqual(first);
+    expect(second.map((image) => image.assetId)).toEqual(['ast_test_0', 'ast_test_1']);
+  });
+
+  it('resolves to an empty array when the write is skipped (route-level KV failure window)', async () => {
+    const kv = new FakeKV();
+    const harness = makePool();
+    resetExtractionCacheForTests();
+    // Force the route-level disable window so the write is skipped pre-ingest.
+    const routeFailure = new HttpKVStoreError(404, 'ROUTE_GONE', 'route gone');
+    // The window is module-internal; simulate by a failing kv.get path that is
+    // treated as route-level — see the K5 suite below for the real mechanism.
+    const failingKv: KVStore = {
+      get: async () => {
+        throw routeFailure;
+      },
+      set: async () => undefined,
+      remove: async () => undefined,
+      keys: async () => [],
+    };
+    // First write: the route-level failure disables the cache for a window.
+    await writeExtractionCache({
+      kv: failingKv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      result: fixtureResult(),
+    });
+    const skipped = await writeExtractionCache({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      result: fixtureResult(),
+    });
+    expect(skipped).toEqual([]);
+    expect(harness.blobs.size).toBe(0);
+    resetExtractionCacheForTests();
+  });
+
   it('releases every allocated asset and writes no record when an image ingest fails', async () => {
     const kv = new FakeKV();
     const harness = makePool();
@@ -447,7 +575,7 @@ describe('writeExtractionCache', () => {
         sourceDocAssetId: 'ast_source_doc',
         result: fixtureResult(),
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual([]);
 
     expect(kv.storedKeys()).toEqual([]);
     expect(harness.remove).toHaveBeenCalledWith('ast_test_0');
@@ -747,6 +875,189 @@ describe('lookupCachedExtraction', () => {
       width: 640,
       height: 480,
     });
+  });
+
+  it('rebuilds by asset id in asset-id mode WITHOUT materializing image bytes (RFC #1153 part 2 C)', async () => {
+    const kv = new FakeKV();
+    const harness = makePool();
+    const original = fixtureResult();
+    await writeExtractionCache({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      sourceDocAssetId: 'ast_source_doc',
+      result: original,
+    });
+    const record = await kv.get<DerivationRecord>(
+      managedKey(DIGEST, 'mineru', '1'),
+      EXTRACTION_CACHE_KV_SCOPE,
+    );
+    expect(record?.images.map((image) => image.assetId)).toEqual(['ast_test_0', 'ast_test_1']);
+
+    const rebuilt = await lookupCachedExtraction({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      fetchImpl: makeFetch(harness),
+      imageMappingMode: 'asset-id',
+    });
+
+    expect(rebuilt).not.toBeNull();
+    // The image BYTES were NOT fetched: only the artifact asset was resolved
+    // from the pool (data-url mode resolves artifact + every image); each
+    // image asset was probed for EXISTENCE through the pool's identity seam
+    // (no byte fetch).
+    expect(harness.resolve).toHaveBeenCalledTimes(1);
+    expect(harness.resolve).toHaveBeenCalledWith(record!.artifactAssetId);
+    expect(harness.exists).toHaveBeenCalledTimes(2);
+    expect(harness.exists).toHaveBeenCalledWith('ast_test_0');
+    expect(harness.exists).toHaveBeenCalledWith('ast_test_1');
+    // metadata.imageMapping maps img_N → the allocated asset id, and
+    // pdfImages carry the id on `assetId` with src left empty.
+    expect(rebuilt?.metadata?.imageMapping).toEqual({ img_1: 'ast_test_0', img_2: 'ast_test_1' });
+    expect(rebuilt?.metadata?.pdfImages?.[0]).toMatchObject({
+      id: 'img_1',
+      src: '',
+      assetId: 'ast_test_0',
+      description: 'Device overview',
+    });
+    expect(rebuilt?.metadata?.pdfImages?.[1]).toMatchObject({
+      id: 'img_2',
+      src: '',
+      assetId: 'ast_test_1',
+    });
+    expect(rebuilt?.images).toEqual([]);
+    // The text half is rebuilt exactly as a real extraction returns it.
+    expect(rebuilt?.text).toBe(original.text);
+  });
+
+  it('reports a MISS in asset-id mode when an image asset was reclaimed (reclaim = miss, N6)', async () => {
+    const kv = new FakeKV();
+    const harness = makePool();
+    await writeExtractionCache({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      sourceDocAssetId: 'ast_source_doc',
+      result: fixtureResult(),
+    });
+    // Simulate a partially-reclaimed cache: one image asset's bytes are gone.
+    harness.blobs.delete('ast_test_1');
+
+    const rebuilt = await lookupCachedExtraction({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      fetchImpl: makeFetch(harness),
+      imageMappingMode: 'asset-id',
+    });
+
+    // A dangling id is a miss, exactly like data-url mode — the real
+    // extraction re-derives instead of serving text with a silently missing
+    // image. The existence probe is an identity read, never a byte fetch.
+    expect(rebuilt).toBeNull();
+    expect(harness.exists).toHaveBeenCalledWith('ast_test_1');
+    expect(harness.resolve).toHaveBeenCalledTimes(1); // artifact only
+  });
+
+  it('probes every image existence with bounded concurrency on a many-image hit (O3)', async () => {
+    const kv = new FakeKV();
+    const harness = makePool();
+    const count = 24;
+    await writeExtractionCache({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      sourceDocAssetId: 'ast_source_doc',
+      result: manyImageResult(count),
+    });
+    // Track the probe concurrency: how many exists calls are in flight at once.
+    let inFlight = 0;
+    let maxInFlight = 0;
+    harness.exists.mockImplementation(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight -= 1;
+      return true;
+    });
+
+    const rebuilt = await lookupCachedExtraction({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      fetchImpl: makeFetch(harness),
+      imageMappingMode: 'asset-id',
+    });
+
+    expect(rebuilt).not.toBeNull();
+    // The happy path consults EVERY image asset — no probe is skipped.
+    expect(harness.exists).toHaveBeenCalledTimes(count);
+    // ... and the batch bound held: never more than 8 probes in flight.
+    expect(maxInFlight).toBeGreaterThan(1);
+    expect(maxInFlight).toBeLessThanOrEqual(8);
+  });
+
+  it('degrades a probe phase that outlives the aggregate budget to a miss, not a hang (O3)', async () => {
+    const kv = new FakeKV();
+    const harness = makePool();
+    await writeExtractionCache({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      sourceDocAssetId: 'ast_source_doc',
+      result: fixtureResult(),
+    });
+    // One image's existence probe never settles — a stalled persistence
+    // endpoint holding the HEAD open. Without an aggregate budget this would
+    // hold the hit path forever; with it, the phase degrades to a miss. The
+    // production default is the 15 s ingest-drain constant; the test injects
+    // a tiny budget so the degrade is observable without waiting 15 s.
+    harness.exists.mockImplementation(async (ref: string) => {
+      if (ref === 'ast_test_1') return new Promise<boolean>(() => undefined);
+      return true;
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const rebuilt = await lookupCachedExtraction({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      fetchImpl: makeFetch(harness),
+      imageMappingMode: 'asset-id',
+      assetProbeBudgetMs: 50,
+    });
+
+    // The hit resolved to a miss after the budget — it did not wait on the
+    // hanging probe — with exactly ONE warn naming the budget.
+    expect(rebuilt).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain('aggregate budget');
+    warn.mockRestore();
   });
 
   it('reports a miss when no record exists', async () => {
@@ -1347,6 +1658,51 @@ describe('fetchExtractionWithCache', () => {
     expect(spies.bytes).not.toHaveBeenCalled();
   });
 
+  it('feeds an asset-id imageMapping on a server-backed hit (RFC #1153 part 2 C)', async () => {
+    const kv = new FakeKV();
+    const harness = makePool();
+    await writeExtractionCache({
+      kv,
+      pool: harness.pool,
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      sourceDocAssetId: 'ast_source_doc',
+      result: fixtureResult(),
+    });
+    const { fetchers, spies } = fetchersThatThrow();
+
+    const outcome = await fetchExtractionWithCache({
+      serverBacked: true,
+      hasAssetId: true,
+      fetchers,
+      logWarning: vi.fn(),
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      sourceDocAssetId: 'ast_source_doc',
+      kv,
+      pool: harness.pool,
+      fetchImpl: makeFetch(harness),
+      imageMappingMode: 'asset-id',
+      parseFailedMessage: 'parse failed',
+    });
+
+    expect(outcome.cacheHit).toBe(true);
+    // The cache hit names images by their pool asset ids directly — no image
+    // bytes were materialized client-side — so generation can be fed by id.
+    expect(outcome.data.metadata?.imageMapping).toEqual({
+      img_1: 'ast_test_0',
+      img_2: 'ast_test_1',
+    });
+    expect(outcome.data.metadata?.pdfImages?.[0]?.assetId).toBe('ast_test_0');
+    expect(outcome.data.images).toEqual([]);
+    expect(spies.assetId).not.toHaveBeenCalled();
+    expect(spies.bytes).not.toHaveBeenCalled();
+  });
+
   it('runs the real extraction on a miss and caches the result', async () => {
     const kv = new FakeKV();
     const harness = makePool();
@@ -1387,6 +1743,45 @@ describe('fetchExtractionWithCache', () => {
     await expect(
       kv.get(managedKey(DIGEST, 'mineru', '1'), EXTRACTION_CACHE_KV_SCOPE),
     ).resolves.not.toBeNull();
+  });
+
+  it('resolves the cacheWrite to the derived image asset ids on a miss (RFC #1153 part 2 B)', async () => {
+    const kv = new FakeKV();
+    const harness = makePool();
+    const assetIdForm = vi.fn(async () => {
+      return new Response(JSON.stringify({ success: true, data: fixtureResult() }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    const byteForm = vi.fn(async () => {
+      throw new Error('byte form must not be used');
+    });
+
+    const outcome = await fetchExtractionWithCache({
+      serverBacked: true,
+      hasAssetId: true,
+      fetchers: { submitAssetIdForm: assetIdForm, submitByteForm: byteForm },
+      logWarning: vi.fn(),
+      contentDigest: DIGEST,
+      domain: 'doc',
+      extractorId: 'mineru',
+      extractorVersion: '1',
+      sourceDocAssetId: 'ast_source_doc',
+      kv,
+      pool: harness.pool,
+      fetchImpl: makeFetch(harness),
+      imageMappingMode: 'asset-id',
+      parseFailedMessage: 'parse failed',
+    });
+
+    // A server-backed caller awaits the detached write to learn the image
+    // asset ids (extraction id → pool asset id) without materializing bytes.
+    const derived = await outcome.cacheWrite;
+    expect(derived).toEqual([
+      expect.objectContaining({ id: 'img_1', assetId: 'ast_test_0' }),
+      expect.objectContaining({ id: 'img_2', assetId: 'ast_test_1' }),
+    ]);
   });
 
   it('writes both keys when the actual extractor differs from the expected one, and hits via the expected key on re-import (K1)', async () => {
