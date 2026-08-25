@@ -275,9 +275,10 @@ export async function fetchClassroomFromApi(
   // degrades to the app's lock-free route instead of silently no-op'ing the
   // cold load; the degraded pass still keeps its ledger+rollback discipline,
   // so a failed unlocked attempt leaves nothing behind.
-  const [{ mutateDocument }, converter] = await Promise.all([
+  const [{ mutateDocument }, converter, inlineConverter] = await Promise.all([
     import('@/lib/document-store'),
     import('@/lib/media/convert-legacy-asset-refs'),
+    import('@/lib/media/convert-inline-image-assets'),
   ]);
   try {
     return await mutateDocument(
@@ -285,11 +286,45 @@ export async function fetchClassroomFromApi(
       async (existing, store) => {
         if (existing) {
           // The document already owns its media (a concurrent cold load, or a
-          // prior open). Reuse it verbatim; if it still carries transport
-          // URLs, conversion could not complete and the load must fail rather
-          // than apply or persist raw addresses.
+          // prior open). If it still carries transport URLs, conversion could
+          // not complete and the load must fail rather than apply or persist
+          // raw addresses.
           if (converter.containsClassroomMediaUrls(existing)) return null;
-          return { stage: existing.stage, scenes: existing.scenes };
+          // Kept inline images (budget expiry, a transient digest failure, an
+          // oversized payload on the birth pass) retry on the NEXT open: the
+          // inline pass re-runs here exactly like the migration path's
+          // every-access semantics. It is idempotent and near-free when no
+          // data URLs remain (one enumeration, no allocations), and a
+          // `changed` result persists through the same save/rollback
+          // machinery the birth path uses.
+          const allocated: string[] = [];
+          try {
+            const inlined = await inlineConverter.convertInlineImageAssets(
+              existing,
+              undefined,
+              shouldConvert,
+              allocated,
+            );
+            if (!inlined.changed) {
+              return { stage: existing.stage, scenes: existing.scenes };
+            }
+            // Same final liveness gate as the birth path: a load superseded in
+            // the last window must not commit side effects it cannot hand over.
+            if (!shouldConvert()) {
+              throw new converter.LegacyConversionAbortedError(allocated);
+            }
+            await store.saveDocument(inlined.document);
+            return {
+              stage: inlined.document.stage,
+              scenes: inlined.document.scenes,
+            };
+          } catch (error) {
+            // Same compensation as the birth path: every failure mode rolls
+            // back the pass's fresh allocations; the already-committed
+            // document itself is untouched.
+            await converter.rollbackConvertedAllocations(payload.stage.id, allocated);
+            throw error;
+          }
         }
 
         const allocated: string[] = [];
@@ -300,19 +335,30 @@ export async function fetchClassroomFromApi(
             shouldConvert,
             allocated,
           );
+          // The inline base64 image converter (#1153 part 4) runs AFTER the
+          // legacy converter — the two are independent, and this order lets
+          // the gen-placeholder converter see its expected shapes first. Both
+          // share one allocation ledger, so a superseded or failed load rolls
+          // every fresh allocation back through the single rollback call.
+          const inlined = await inlineConverter.convertInlineImageAssets(
+            converted.document,
+            undefined,
+            shouldConvert,
+            allocated,
+          );
           // The converter rechecks liveness at its commit boundaries; this is
           // the final gate before the document write, so a load superseded in
           // the last window never commits side effects it cannot hand over.
           if (!shouldConvert()) {
             throw new converter.LegacyConversionAbortedError(allocated);
           }
-          if (converter.containsClassroomMediaUrls(converted.document)) {
+          if (converter.containsClassroomMediaUrls(inlined.document)) {
             throw new Error('server classroom media conversion was incomplete');
           }
-          await store.saveDocument(converted.document);
+          await store.saveDocument(inlined.document);
           return {
-            stage: converted.document.stage,
-            scenes: converted.document.scenes,
+            stage: inlined.document.stage,
+            scenes: inlined.document.scenes,
           };
         } catch (error) {
           // Every failure mode -- a liveness abort or an ordinary converter
