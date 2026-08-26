@@ -55,7 +55,12 @@ interface ServerConfig {
 // Env-var prefix mappings
 // ---------------------------------------------------------------------------
 
-const LLM_ENV_MAP: Record<string, string> = {
+/**
+ * Env-var prefix → LLM provider-id mapping (e.g. `DEEPSEEK_API_KEY` configures
+ * the `deepseek` provider). Exported for boot-time config validation, which
+ * checks `<PREFIX>_MODELS` pins against the provider's key env.
+ */
+export const LLM_ENV_MAP: Record<string, string> = {
   OPENAI: 'openai',
   AZURE_OPENAI: 'azure',
   ATLASCLOUD: 'atlascloud',
