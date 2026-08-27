@@ -158,6 +158,10 @@ export interface ImageGenerationOptions {
   aspectRatio?: '16:9' | '4:3' | '1:1' | '9:16';
   /** Optional artistic style (must be supported by the chosen provider) */
   style?: string;
+  /** Owning stage, for server-side attribution of a generation call. */
+  stageId?: string;
+  /** Cancel server-side provider I/O (agent runtime / background callers). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -262,6 +266,10 @@ export interface VideoGenerationOptions {
   aspectRatio?: '16:9' | '4:3' | '1:1' | '9:16' | '3:4' | '21:9';
   /** Desired output resolution */
   resolution?: '480p' | '720p' | '1080p';
+  /** Owning stage, for server-side attribution of a generation call. */
+  stageId?: string;
+  /** Cancel server-side provider I/O (agent runtime / background callers). */
+  signal?: AbortSignal;
 }
 
 /**

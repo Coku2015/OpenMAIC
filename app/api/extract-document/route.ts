@@ -228,19 +228,26 @@ async function runExtraction(
   // flattened to the same text shape documents produce. Same route, same
   // downstream generation path.
   if (SUPPORTED_MEDIA_MIME_TYPES.includes(mimeType)) {
-    logState.resolvedProviderId = requestConfig.providerId || 'alidocmind';
+    logState.resolvedProviderId = requestConfig.providerId || '';
     // Reject a document-only provider (e.g. unpdf/mineru) for a media upload
     // with a clear 4xx instead of forwarding it into the media registry and
     // surfacing an opaque 500.
-    const mediaProvider = getMediaExtractorProvider(logState.resolvedProviderId);
-    if (!mediaProvider || !mediaProvider.supportedMimeTypes.includes(mimeType)) {
+    const mediaProvider = requestConfig.providerId
+      ? getMediaExtractorProvider(requestConfig.providerId)
+      : undefined;
+    if (
+      requestConfig.providerId &&
+      (!mediaProvider || !mediaProvider.supportedMimeTypes.includes(mimeType))
+    ) {
       return apiError(
         'INVALID_REQUEST',
         400,
-        `Provider "${logState.resolvedProviderId}" cannot extract ${mimeType}. Choose a media-capable provider (e.g. AliDocMind).`,
+        `Provider "${requestConfig.providerId}" cannot extract ${mimeType}. Choose a media-capable provider (AliDocMind or local ffmpeg).`,
       );
     }
-    const mediaManaged = isServerConfiguredProvider('pdf', logState.resolvedProviderId);
+    const mediaManaged =
+      requestConfig.providerId !== 'local-ffmpeg' &&
+      isServerConfiguredProvider('pdf', 'alidocmind');
     // When managed, resolve the server-owned AK/SK (env OR YAML) explicitly so
     // a YAML-only deployment works — the client-level env fallback reads env
     // vars only. Client-entered creds are used only when unmanaged.
@@ -260,7 +267,7 @@ async function runExtraction(
       fileSize,
       mimeType,
       config: {
-        providerId: logState.resolvedProviderId,
+        providerId: requestConfig.providerId || '',
         apiKey: mediaManaged ? undefined : requestConfig.apiKey || undefined,
         baseUrl: mediaManaged ? mediaManagedCreds?.baseUrl : mediaClientBaseUrl,
         accessKeyId: mediaManaged
@@ -274,6 +281,8 @@ async function runExtraction(
         allowEnvFallback: mediaManaged,
       },
     });
+    logState.resolvedProviderId =
+      mediaArtifact.metadata.providerId || requestConfig.providerId || '';
 
     const mediaText = mediaArtifactToText(mediaArtifact);
     // An artifact with no transcript, keyframes, or synopsis carries no usable

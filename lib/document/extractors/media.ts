@@ -21,6 +21,21 @@ function createMediaBackedExtractor(id: MediaParseProviderId): MediaExtractorPro
     // MEDIA_PARSE_PROVIDERS entry ever lacks a manifest entry, and the
     // registry sync test pins the reverse direction (no orphan entries).
     ...mediaManifestEntry(id),
+    async availability(input) {
+      const config = input.config;
+      const hasExplicitCredentials = Boolean(config.accessKeyId && config.accessKeySecret);
+      const hasEnvironmentCredentials = Boolean(
+        config.allowEnvFallback &&
+        process.env.ALIDOCMIND_ACCESS_KEY_ID &&
+        process.env.ALIDOCMIND_ACCESS_KEY_SECRET,
+      );
+      return hasExplicitCredentials || hasEnvironmentCredentials
+        ? { available: true }
+        : {
+            available: false,
+            reason: 'AliDocMind credentials are not configured',
+          };
+    },
     async extract(input: MediaExtractorInput) {
       return parseMedia({
         buffer: input.buffer,

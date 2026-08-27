@@ -6,9 +6,8 @@ import { createLogger } from '@/lib/logger';
 
 const log = createLogger('AudioRecorder');
 
-// Window.SpeechRecognition / webkitSpeechRecognition are declared globally by
-// @assistant-ui/core's speech adapter; re-augmenting them here as `any` conflicts
-// with that typing, so we rely on the global declaration and cast the instance.
+// Window.SpeechRecognition / webkitSpeechRecognition have minimal constructor
+// declarations in types/web-speech.d.ts; this hook casts the richer instance.
 
 export interface UseAudioRecorderOptions {
   onTranscription?: (text: string) => void;

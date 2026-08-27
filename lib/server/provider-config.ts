@@ -415,6 +415,24 @@ export function resolveManagedAliDocMindCredentials():
   return undefined;
 }
 
+/** Provider-neutral extraction input populated from server-managed media credentials. */
+export function resolveServerMediaExtractorConfig(): {
+  providerId: string;
+  accessKeyId?: string;
+  accessKeySecret?: string;
+  baseUrl?: string;
+  allowEnvFallback: boolean;
+} {
+  const credentials = resolveManagedAliDocMindCredentials();
+  return {
+    providerId: '',
+    accessKeyId: credentials?.accessKeyId,
+    accessKeySecret: credentials?.accessKeySecret,
+    baseUrl: credentials?.baseUrl,
+    allowEnvFallback: true,
+  };
+}
+
 function applyOpenAIImageFallback(
   imageConfig: Record<string, ServerProviderEntry>,
   yamlImageSection: Record<string, Partial<ServerProviderEntry>> | undefined,
@@ -567,6 +585,20 @@ export function isServerProviderDisabled(section: CapabilitySection, providerId:
   return getConfig().disabled[section].has(providerId);
 }
 
+/**
+ * Enabled-provider resolver: the provider IDs of a capability listing that
+ * this deployment actually serves — present in the listing and not
+ * force-disabled (`{ disabled: true }`, #665). The provider-config API
+ * deliberately includes force-disabled providers so admin surfaces can show
+ * them; every capability consumer (agent tool selectors and gates, server
+ * default resolution) must resolve enabledness through this — disable wins.
+ */
+export function enabledProviderIds<T extends { disabled?: boolean }>(
+  listing: Record<string, T>,
+): string[] {
+  return Object.keys(listing).filter((id) => !listing[id]?.disabled);
+}
+
 function resolveSectionApiKey(
   section: ProviderSection,
   providerId: string,
@@ -637,6 +669,17 @@ export function getServerTTSProviders(): Record<string, { disabled?: boolean }> 
   for (const id of Object.keys(cfg.tts)) result[id] = {};
   for (const id of cfg.disabled.tts) result[id] = { disabled: true };
   return result;
+}
+
+/**
+ * TTS providers this deployment actually serves: present in server config and
+ * not force-disabled. Browser-native voices are excluded (no static voice list
+ * and no server-side synthesis without a configured backend).
+ */
+export function enabledServerTTSProviderIds(): string[] {
+  return Object.entries(getServerTTSProviders())
+    .filter(([id, info]) => id !== 'browser-native-tts' && !info.disabled)
+    .map(([id]) => id);
 }
 
 export function resolveTTSApiKey(providerId: string, clientKey?: string): string {

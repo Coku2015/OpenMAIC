@@ -7,6 +7,7 @@ import {
   registerQwenVoice,
 } from '@/lib/audio/qwen-voice-clone';
 import { QWEN_TTS_VOICE_CLONE_MODEL } from '@/lib/audio/constants';
+import { resolveQwenVoiceCloneModel } from '@/lib/server/provider-config';
 import { validateReferenceAudio } from '@/lib/audio/wav-validate';
 import type {
   VoiceRegistrationAdapter,
@@ -194,9 +195,15 @@ async function bootstrapReferenceClip(): Promise<never> {
   throw new QwenVoiceCloneError('QWEN_VC_BOOTSTRAP_UNSUPPORTED', 400);
 }
 
+/** Enrollment targets the server-resolved clone model, not the synthesis model. */
+function resolveRegistrationModel(): string {
+  return resolveQwenVoiceCloneModel();
+}
+
 export const qwenVoiceCloneRegistrationAdapter: VoiceRegistrationAdapter = {
   supportsRegistration: () => true,
   supportsBootstrapReferenceClip: false,
+  resolveRegistrationModel,
   voiceExists,
   registerVoice,
   deleteVoice,

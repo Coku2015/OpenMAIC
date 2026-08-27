@@ -15,6 +15,8 @@ import { createLogger } from '@/lib/logger';
 import { MediaStageProvider } from '@/lib/contexts/media-stage-context';
 import { generateMediaForOutlines } from '@/lib/media/media-orchestrator';
 import { useAgentRegistry } from '@/lib/orchestration/registry/store';
+import { fetchStageMeta } from '@/lib/classroom/stage-meta-client';
+import { noteStageOwnership } from '@/lib/classroom/stage-ownership-signal';
 import {
   applyClassroomStageAndScenes,
   defaultClassroomLoadDeps,
@@ -71,6 +73,37 @@ export default function ClassroomDetailPage() {
         setLoading,
         log,
       });
+
+      // The stage-meta sidecar resolves the viewer-facing ownership facts the
+      // document seam does not carry — `isOwner` decides read-only vs editable
+      // (see `stage-meta-client.ts`). Run it strictly AFTER the load applied
+      // its defaults so its answer wins, and fire it without blocking the
+      // render that already happened.
+      if (isEffectCurrent()) {
+        void fetchStageMeta(classroomId)
+          .then((result) => {
+            if (!isEffectCurrent()) return;
+            if (result.outcome === 'found') {
+              noteStageOwnership(classroomId, true, {
+                isOwner: result.meta.isOwner,
+              });
+              useStageStore.getState().setViewerAccess({
+                isOwner: result.meta.isOwner,
+              });
+            } else if (result.outcome === 'unavailable') {
+              // A silent sidecar is not "this is a stranger's course": record
+              // the outage so nothing treats `isOwner === false` as a visitor
+              // conclusion. The edit gate stays on the upstream defaults.
+              noteStageOwnership(classroomId, false, null);
+            } else {
+              // 'absent' — no sidecar row for this id. This classroom also
+              // serves local-only courses, so the upstream editable default
+              // stays; the server's owner-scoped writes remain the authority.
+              noteStageOwnership(classroomId, true, null);
+            }
+          })
+          .catch(() => noteStageOwnership(classroomId, false, null));
+      }
     },
     [classroomId, loadFromStorage],
   );

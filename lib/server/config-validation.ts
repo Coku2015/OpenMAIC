@@ -13,13 +13,17 @@
  *  - a bare model id (no `provider:` prefix) — it still defaults to `openai`
  *    for backward compatibility, but that fallback is deprecated;
  *  - a `<PREFIX>_MODELS` env set for a provider whose key env is absent
- *    (pinned models on an unconfigured provider — probably a typo).
+ *    (pinned models on an unconfigured provider — probably a typo);
+ *  - the agent runtime flag set without a `DATABASE_URL` — the runtime is
+ *    enabled but unusable, so its probe reports disabled and its routes
+ *    answer 404 while the runner never starts.
  *
  * Everything here is a warning, never a throw: operators with partial config
  * still get a running app, and the warnings name exactly what is broken.
  */
 
 import { getProvider, warnBareModelIdDeprecation } from '@/lib/ai/providers';
+import { isAgentRuntimeEnabled } from '@/lib/config/feature-flags';
 import { LLM_STAGES } from '@/lib/server/model-routes';
 import {
   isServerConfiguredProvider,
@@ -149,6 +153,22 @@ function validateModelsEnvPins(): void {
 }
 
 /**
+ * The agent runtime needs the flag AND a database: the runner and every
+ * persistence-touching route depend on the store. A flag without
+ * `DATABASE_URL` is the classic "nothing happens" misconfiguration — the
+ * probe reports the runtime unusable, its routes answer 404, and no runner
+ * starts. One boot-time warning saves the whole debugging session.
+ */
+function validateAgentRuntime(): void {
+  if (!isAgentRuntimeEnabled()) return;
+  if (!process.env.DATABASE_URL?.trim()) {
+    warn(
+      'OPENMAIC_AGENT_RUNTIME_ENABLED is set but DATABASE_URL is not — the agent runtime is enabled but unusable: its probe reports disabled, its routes answer 404, and no runner starts. Set DATABASE_URL or disable the flag.',
+    );
+  }
+}
+
+/**
  * Validate server model-routing config at boot. Warn-only, cheap, and
  * non-throwing: a broken config never prevents the server from starting.
  */
@@ -157,6 +177,7 @@ export function validateServerConfig(): void {
     validateModelRoutes();
     validateDefaultModel();
     validateModelsEnvPins();
+    validateAgentRuntime();
   } catch (err) {
     // Boot-time validation must never take the server down.
     const detail = err instanceof Error ? err.message : String(err);

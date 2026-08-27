@@ -25,6 +25,13 @@ export interface VoiceRegistrationAdapter {
   supportsRegistration(options?: Record<string, unknown>): boolean;
   /** Whether the adapter can synthesize its own reference clip from a voice design. */
   supportsBootstrapReferenceClip?: boolean;
+  /**
+   * The model this adapter's registration flow uses (enrollment target or the
+   * synthesis model behind a bootstrap clip), resolved provider-side.
+   * `clientModel` is a caller-supplied TTS model hint; the adapter decides
+   * whether (and how) to honor it. `undefined` when registration is model-less.
+   */
+  resolveRegistrationModel(clientModel?: string): string | undefined;
   /** Whether `voiceId` is registered, or `unknown` when the lookup is inconclusive. */
   voiceExists(
     cfg: VoiceRegistrationConfig,

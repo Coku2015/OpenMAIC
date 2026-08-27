@@ -29,6 +29,7 @@ import {
   MINERU_CLOUD_MIMES,
   MINERU_SELFHOST_MIMES,
   PLAIN_TEXT_MIMES,
+  LOCAL_FFMPEG_MEDIA_MIMES,
 } from '../mime';
 import type { DocumentExtractorCapabilities, MediaExtractorCapabilities } from '../types';
 
@@ -147,6 +148,19 @@ const MEDIA_EXTRACTOR_MANIFEST: Record<string, MediaExtractorManifestEntry> = {
       synopsis: true,
       ocr: true,
       async: true,
+    },
+  },
+  'local-ffmpeg': {
+    id: 'local-ffmpeg',
+    displayName: 'Local ffmpeg',
+    version: '1',
+    supportedMimeTypes: LOCAL_FFMPEG_MEDIA_MIMES,
+    capabilities: {
+      transcript: true,
+      keyframes: true,
+      synopsis: false,
+      ocr: false,
+      async: false,
     },
   },
 };

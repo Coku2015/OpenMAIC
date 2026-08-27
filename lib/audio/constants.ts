@@ -344,6 +344,11 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     requiresApiKey: true,
     defaultBaseUrl: 'https://dashscope.aliyuncs.com/api/v1',
     icon: '/logos/bailian.svg',
+    // Paid showcase presets: never offered to the agent even when this provider
+    // is configured (explicit mechanism, not "no env so absent"). A clone
+    // registered this session through the registration adapter stays bindable;
+    // only the preset list is excluded from the agent catalog.
+    excludeFromAgentVoiceCatalog: true,
     models: [
       { id: 'qwen3-tts-flash', name: 'Qwen3 TTS Flash' },
       { id: 'qwen3-tts-instruct-flash', name: 'Qwen3 TTS Instruct Flash' },
