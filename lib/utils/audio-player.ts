@@ -8,6 +8,7 @@
  */
 
 import { createLogger } from '@/lib/logger';
+import { primeAudioOnFirstGesture } from '@/lib/utils/audio-unlock';
 
 const log = createLogger('AudioPlayer');
 
@@ -46,6 +47,14 @@ export class AudioPlayer {
    * its supersession is noticed.
    */
   private fetchAbort: AbortController | null = null;
+
+  constructor() {
+    // WebKit touch devices reject play() calls that land outside the user
+    // gesture — the engine's resolve-bytes-then-play flow does exactly that.
+    // Priming inside the first tap (see audio-unlock.ts) lifts the restriction
+    // for the rest of the page's lifetime. No-op on desktop browsers.
+    primeAudioOnFirstGesture();
+  }
 
   /** Abort the in-flight legacy narration fetch, if one exists. */
   private abortLegacyFetch(): void {
