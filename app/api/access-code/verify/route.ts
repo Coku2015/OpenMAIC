@@ -1,4 +1,4 @@
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { timingSafeEqual } from 'crypto';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { createAccessToken } from '@/lib/server/access-token';
@@ -28,13 +28,23 @@ export async function POST(request: Request) {
   }
 
   const token = createAccessToken(accessCode);
+  // The Secure attribute is only honored on HTTPS origins: behind an HTTP
+  // frontend (e.g. self-hosted Traefik on a LAN), a Secure cookie is silently
+  // dropped by the browser and every later API call 401s while the verify
+  // response itself looked successful. Follow the actual request scheme —
+  // the reverse proxy reports it via x-forwarded-proto — and fall back to
+  // NODE_ENV only when no proxy header exists (direct access).
+  const forwardedProto = (await headers()).get('x-forwarded-proto');
+  const secureCookie = forwardedProto
+    ? forwardedProto.split(',')[0].trim() === 'https'
+    : process.env.NODE_ENV === 'production';
   const cookieStore = await cookies();
   cookieStore.set('openmaic_access', token, {
     httpOnly: true,
     sameSite: 'lax',
     path: '/',
     maxAge: 60 * 60 * 24 * 7, // 7 days
-    secure: process.env.NODE_ENV === 'production',
+    secure: secureCookie,
   });
 
   return apiSuccess({ valid: true });
