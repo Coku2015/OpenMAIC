@@ -109,3 +109,34 @@ describe('getLearnerKey cross-tab locking', () => {
     await expect(getLearnerKey(kv)).resolves.toBe(key);
   });
 });
+
+describe('getLearnerKey with NEXT_PUBLIC_SHARED_LEARNER_KEY', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('returns the shared key for every caller, bypassing stores and minting', async () => {
+    vi.stubEnv('NEXT_PUBLIC_SHARED_LEARNER_KEY', 'home-lab');
+    const storage = memoryStorage();
+
+    await expect(getLearnerKey(new BrowserKVStore({ storage }))).resolves.toBe(
+      'shared:home-lab',
+    );
+    // The no-store path resolves to the same partition without touching storage.
+    await expect(getLearnerKey()).resolves.toBe('shared:home-lab');
+    expect(storage.length).toBe(0);
+  });
+
+  it('normalizes the configured value under the shared: prefix', async () => {
+    vi.stubEnv('NEXT_PUBLIC_SHARED_LEARNER_KEY', '  home-lab  ');
+    await expect(getLearnerKey(new BrowserKVStore({ storage: memoryStorage() }))).resolves.toBe(
+      'shared:home-lab',
+    );
+  });
+
+  it('a blank value behaves as unset and falls through to per-device minting', async () => {
+    vi.stubEnv('NEXT_PUBLIC_SHARED_LEARNER_KEY', '   ');
+    const key = await getLearnerKey(new BrowserKVStore({ storage: memoryStorage() }));
+    expect(key).toMatch(/^anon:[0-9a-f-]{36}$/);
+  });
+});

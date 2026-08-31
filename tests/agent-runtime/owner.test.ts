@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
+import {
+  resolveRequestOwnerId,
+  resolveSharedOwnerId,
+} from '@/lib/server/agent-runtime/owner';
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -71,6 +74,53 @@ describe('resolveRequestOwnerId', () => {
     });
 
     expect(resolveRequestOwnerId(request, responseHeaders, 'user-42')).toBe('user-42');
+    expect(responseHeaders.has('set-cookie')).toBe(false);
+  });
+});
+
+describe('resolveSharedOwnerId', () => {
+  it('is undefined when the env var is unset or blank', () => {
+    vi.stubEnv('PERSISTENCE_SHARED_OWNER_KEY', '');
+    expect(resolveSharedOwnerId()).toBeUndefined();
+    vi.stubEnv('PERSISTENCE_SHARED_OWNER_KEY', '   ');
+    expect(resolveSharedOwnerId()).toBeUndefined();
+  });
+
+  it('normalizes a configured value under the shared: prefix', () => {
+    vi.stubEnv('PERSISTENCE_SHARED_OWNER_KEY', '  home-lab  ');
+    expect(resolveSharedOwnerId()).toBe('shared:home-lab');
+  });
+});
+
+describe('resolveRequestOwnerId with PERSISTENCE_SHARED_OWNER_KEY', () => {
+  it('returns the shared owner for any request without minting a cookie', () => {
+    vi.stubEnv('PERSISTENCE_SHARED_OWNER_KEY', 'home-lab');
+    const responseHeaders = new Headers();
+
+    expect(resolveRequestOwnerId(new Request('http://localhost/agent'), responseHeaders)).toBe(
+      'shared:home-lab',
+    );
+    expect(responseHeaders.has('set-cookie')).toBe(false);
+  });
+
+  it('ignores an existing anonymous cookie while the shared owner is set', () => {
+    vi.stubEnv('PERSISTENCE_SHARED_OWNER_KEY', 'home-lab');
+    const responseHeaders = new Headers();
+    const request = new Request('http://localhost/agent', {
+      headers: { cookie: 'anonymous_id=a652e716-0e2e-47f5-8432-4ee60f6f0977' },
+    });
+
+    expect(resolveRequestOwnerId(request, responseHeaders)).toBe('shared:home-lab');
+    expect(responseHeaders.has('set-cookie')).toBe(false);
+  });
+
+  it('an explicit authenticatedOwnerId still wins over the shared owner', () => {
+    vi.stubEnv('PERSISTENCE_SHARED_OWNER_KEY', 'home-lab');
+    const responseHeaders = new Headers();
+
+    expect(
+      resolveRequestOwnerId(new Request('http://localhost/agent'), responseHeaders, 'user-42'),
+    ).toBe('user-42');
     expect(responseHeaders.has('set-cookie')).toBe(false);
   });
 });

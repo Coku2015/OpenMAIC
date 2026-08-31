@@ -16,7 +16,11 @@
  *    (pinned models on an unconfigured provider — probably a typo);
  *  - the agent runtime flag set without a `DATABASE_URL` — the runtime is
  *    enabled but unusable, so its probe reports disabled and its routes
- *    answer 404 while the runner never starts.
+ *    answer 404 while the runner never starts;
+ *  - the shared-identity env vars (`PERSISTENCE_SHARED_OWNER_KEY`,
+ *    `NEXT_PUBLIC_SHARED_LEARNER_KEY`) — the personal-deployment mode that
+ *    collapses per-browser identities into one, including the classic
+ *    "set without `DATABASE_URL`" misconfiguration.
  *
  * Everything here is a warning, never a throw: operators with partial config
  * still get a running app, and the warnings name exactly what is broken.
@@ -169,6 +173,34 @@ function validateAgentRuntime(): void {
 }
 
 /**
+ * The shared-identity env vars intentionally collapse per-browser identities
+ * into one owner/learner for personal multi-device deployments. They are
+ * powerful but blunt: every site visitor shares one classroom library, and
+ * the shared owner only matters when server persistence (DATABASE_URL) is
+ * actually configured. Boot-time notes save the "why does nothing change /
+ * why does everyone see everything" debugging session.
+ */
+function validateSharedIdentity(): void {
+  const sharedOwner = process.env.PERSISTENCE_SHARED_OWNER_KEY?.trim();
+  if (sharedOwner) {
+    if (!process.env.DATABASE_URL?.trim()) {
+      warn(
+        'PERSISTENCE_SHARED_OWNER_KEY is set but DATABASE_URL is not — the shared classroom library only exists with server-backed persistence. Set DATABASE_URL or unset the key.',
+      );
+    } else {
+      warn(
+        'PERSISTENCE_SHARED_OWNER_KEY is set — every visitor shares one classroom library (per-browser isolation is off). Keep the site gated (ACCESS_CODE / network boundary).',
+      );
+    }
+  }
+  if (process.env.NEXT_PUBLIC_SHARED_LEARNER_KEY?.trim()) {
+    warn(
+      'NEXT_PUBLIC_SHARED_LEARNER_KEY is set — all devices share one learner partition (playback progress and whiteboard visibility are common).',
+    );
+  }
+}
+
+/**
  * Validate server model-routing config at boot. Warn-only, cheap, and
  * non-throwing: a broken config never prevents the server from starting.
  */
@@ -178,6 +210,7 @@ export function validateServerConfig(): void {
     validateDefaultModel();
     validateModelsEnvPins();
     validateAgentRuntime();
+    validateSharedIdentity();
   } catch (err) {
     // Boot-time validation must never take the server down.
     const detail = err instanceof Error ? err.message : String(err);

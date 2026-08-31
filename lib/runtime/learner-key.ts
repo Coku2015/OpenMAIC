@@ -66,19 +66,36 @@ async function readOrMint(store: KVStore): Promise<string> {
 }
 
 /**
+ * Personal-deployment shared learner identity: when
+ * `NEXT_PUBLIC_SHARED_LEARNER_KEY` is set (build time), every device resolves
+ * to one fixed partition so playback progress and whiteboard visibility sync
+ * across browsers. Like `PERSISTENCE_SHARED_OWNER_KEY` on the server, this
+ * intentionally removes the per-device isolation boundary — gate the site
+ * before enabling.
+ */
+export function resolveSharedLearnerKey(): string | undefined {
+  const raw = process.env.NEXT_PUBLIC_SHARED_LEARNER_KEY?.trim();
+  return raw ? `shared:${raw}` : undefined;
+}
+
+/**
  * Resolve the client session's learner partition key.
  *
- * An explicit KV store takes priority over app-wide configuration. Without an
- * explicit store, a configured provider is invoked only on first resolution:
- * concurrent calls share its in-flight promise and the first resolved value is
- * retained for the session. Identity changes mid-session belong in the
- * application layer (reload or a `mergeLearner` flow).
+ * A shared deployment key (above) wins over everything. Otherwise an explicit
+ * KV store takes priority over app-wide configuration. Without an explicit
+ * store, a configured provider is invoked only on first resolution: concurrent
+ * calls share its in-flight promise and the first resolved value is retained
+ * for the session. Identity changes mid-session belong in the application
+ * layer (reload or a `mergeLearner` flow).
  *
  * Client-only: this singleton is not SSR-safe or intended for request-scoped
  * identity. Partial dev-mode HMR can recreate this cache independently of the
  * configuration module; reload after changing bootstrap configuration.
  */
 export function getLearnerKey(kv?: KVStore): Promise<string> {
+  const sharedKey = resolveSharedLearnerKey();
+  if (sharedKey) return Promise.resolve(sharedKey);
+
   // Injected stores (tests, server-side callers) bypass the memo but stay
   // race-safe through the lock / read-after-write above.
   if (kv) return readOrMint(kv);

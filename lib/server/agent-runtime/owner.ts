@@ -28,6 +28,18 @@ function anonymousCookieHeader(id: string): string {
 }
 
 /**
+ * Personal-deployment shared identity: when `PERSISTENCE_SHARED_OWNER_KEY` is
+ * set, every request resolves to one fixed owner instead of a per-browser
+ * anonymous cookie, so all browsers on a self-hosted instance see the same
+ * classroom library. This intentionally removes the per-visitor isolation
+ * boundary — gate the site (ACCESS_CODE / network boundary) before enabling.
+ */
+export function resolveSharedOwnerId(): string | undefined {
+  const raw = process.env.PERSISTENCE_SHARED_OWNER_KEY?.trim();
+  return raw ? `shared:${raw}` : undefined;
+}
+
+/**
  * Resolve the request identity used to partition agent sessions.
  *
  * Session lists are user-visible data keyed by owner. A shared constant would
@@ -55,6 +67,9 @@ export function resolveRequestOwnerId(
   authenticatedOwnerId?: string,
 ): string {
   if (authenticatedOwnerId) return authenticatedOwnerId;
+
+  const sharedOwnerId = resolveSharedOwnerId();
+  if (sharedOwnerId) return sharedOwnerId;
 
   const existingId = readCookie(req.headers, ANONYMOUS_COOKIE);
   if (existingId && UUID_V4.test(existingId)) return `anon:${existingId}`;
