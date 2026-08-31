@@ -18,6 +18,8 @@ import type { SpeechAction } from '@/lib/types/action';
 import { splitLongSpeechActions } from '@/lib/audio/tts-utils';
 import { measureAudioDuration } from '@/lib/audio/audio-duration';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
+import { getAssetPool } from '@/lib/media/asset-pool';
+import { isBrowserPersistenceEnabled } from '@/lib/persistence/bootstrap';
 import { resolveAgentVoiceOptions, pickNarratorAgent } from '@/lib/audio/agent-voice';
 import {
   getEnabledProvidersWithVoices,
@@ -471,7 +473,7 @@ export async function generateAndStoreTTS(
   // still persists and plays.
   const duration = measureAudioDuration(bytes, data.format) ?? undefined;
   const audioId = existingAudioId ?? requestId;
-  await db.audioFiles.put({
+  const record = {
     id: audioId,
     stageId,
     blob,
@@ -480,13 +482,31 @@ export async function generateAndStoreTTS(
     text,
     voice: ttsVoice,
     createdAt: Date.now(),
-  });
+  };
+
+  // Server-backed persistence: the durable copy of the narration lives in the
+  // server asset store, so every device can fetch it at playback. The returned
+  // audioId is the pool reference (callers assign it back to the speech
+  // action); the Dexie row remains the generating browser's local mirror.
+  if (isBrowserPersistenceEnabled()) {
+    const pooledRef = await getAssetPool().put(blob);
+    await db.audioFiles.put({ ...record, id: pooledRef });
+    return pooledRef;
+  }
+
+  await db.audioFiles.put(record);
   return audioId;
 }
 
 export async function removeFreshTtsAllocations(assetIds: readonly string[]): Promise<void> {
+  const serverBacked = isBrowserPersistenceEnabled();
   for (const assetId of new Set(assetIds)) {
     await db.audioFiles.delete(assetId).catch(() => undefined);
+    // Roll back the server copy too — a fresh TTS allocation that survives its
+    // failed scene would leak narration bytes no document references.
+    if (serverBacked) {
+      await getAssetPool().remove(assetId).catch(() => undefined);
+    }
   }
 }
 
