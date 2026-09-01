@@ -119,6 +119,38 @@ export class AudioPlayer {
     audioLog?.push({ t: Date.now(), kind: 'resolve', audioId: audioId.slice(0, 30) });
     diagLog(`播放请求 ${audioId.slice(0, 18)}`);
     try {
+      // ── 首选路径（持久化模式）：直连流式播放 ──
+      // 媒体元素直接以 cookie 鉴权（同源自动携带）从服务器流式取音频，
+      // 完全绕开 blob/fetch 在 WebKit 上的两个陷阱（fetch(blob:) 不支持、
+      // octet-stream 类型 blob 被拒播）。iOS 对原生流式播放的兼容性最好。
+      if (isBrowserPersistenceEnabled()) {
+        try {
+          this.stopAudioElement();
+          const stream = new Audio();
+          stream.src = `/api/persistence/assets/${audioId}/content`;
+          stream.volume = this.muted ? 0 : this.volume;
+          stream.defaultPlaybackRate = this.playbackRate;
+          stream.playbackRate = this.playbackRate;
+          stream.addEventListener('ended', () => {
+            if (this.audio === stream) this.audio = null;
+            this.onEndedCallback?.();
+          });
+          this.audio = stream;
+          await stream.play();
+          if (requestToken !== this.requestToken) {
+            stream.pause();
+            return false;
+          }
+          diagLog('直连流式: 播放中');
+          audioLog?.push({ t: Date.now(), kind: 'direct-stream', src: stream.src.slice(0, 60) });
+          return true;
+        } catch (streamError) {
+          if (requestToken !== this.requestToken) return false;
+          diagLog(`直连流式失败(${String(streamError).slice(0, 40)})，降级 blob 路径`);
+          this.stopAudioElement();
+        }
+      }
+
       let blob = await resolveBytes(audioId);
       if (requestToken !== this.requestToken) return false;
       audioLog?.push({ t: Date.now(), kind: 'dexie-result', found: !!blob, size: blob?.size ?? 0 });

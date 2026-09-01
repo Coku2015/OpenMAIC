@@ -11,7 +11,7 @@
  * replace this module with real session verification and derive learner
  * identity from server-controlled claims.
  */
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 
 import type { AssetPrincipal } from '@openmaic/storage';
@@ -24,6 +24,44 @@ type PersistencePrincipal = RuntimeHttpPrincipal & Partial<Pick<AssetPrincipal, 
  * ownership partition; assets get the same treatment until real auth lands.
  */
 const SHARED_ASSET_PRINCIPAL = 'shared';
+
+const ACCESS_COOKIE = 'openmaic_access';
+
+function readCookie(cookieHeader: string | undefined | null, name: string): string | undefined {
+  if (!cookieHeader) return undefined;
+  for (const item of cookieHeader.split(';')) {
+    const eq = item.indexOf('=');
+    if (eq === -1 || item.slice(0, eq).trim() !== name) continue;
+    try {
+      return decodeURIComponent(item.slice(eq + 1).trim());
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Personal-deployment option (PERSISTENCE_ALLOW_COOKIE_AUTH=true): accept the
+ * site's HMAC-signed access-code cookie as an alternative to the Bearer
+ * token. Media elements cannot attach Authorization headers, so streaming
+ * narration/images directly from <audio src>/<img src> needs cookie auth.
+ * The HMAC cookie is only minted after the ACCESS_CODE gate, so this keeps
+ * the same "anyone past the site gate" trust boundary as the Bearer token.
+ */
+function verifyAccessCookie(cookieValue: string | undefined): boolean {
+  const accessCode = process.env.ACCESS_CODE;
+  if (process.env.PERSISTENCE_ALLOW_COOKIE_AUTH !== 'true' || !accessCode || !cookieValue) {
+    return false;
+  }
+  const dot = cookieValue.indexOf('.');
+  if (dot === -1) return false;
+  const timestamp = cookieValue.slice(0, dot);
+  const signature = cookieValue.slice(dot + 1);
+  const expected = createHmac('sha256', accessCode).update(timestamp).digest('hex');
+  if (signature.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
 
 function singleHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
@@ -38,25 +76,31 @@ function secureEqual(left: string, right: string): boolean {
 function authenticatePersistenceCredentials(
   authorization: string | undefined,
   learnerKey: string | undefined,
+  accessCookie: string | undefined,
 ): PersistencePrincipal | undefined {
   const token = process.env.PERSISTENCE_DEV_TOKEN;
-  if (!token || !authorization || !secureEqual(authorization, `Bearer ${token}`)) return undefined;
+  if (
+    token &&
+    authorization &&
+    secureEqual(authorization, `Bearer ${token}`)
+  ) {
+    // 同上：共享资产分区 + learnerKey 仅分区运行时会话
+    return { key: SHARED_ASSET_PRINCIPAL, ...(learnerKey ? { learnerKey } : {}) };
+  }
 
-  // Documents are stored without any ownership partition, so assets are
-  // stored under one shared principal to match: this authenticator provides
-  // no user isolation either way (the header is client-supplied), and a
-  // per-header asset partition only meant a converted document's assets
-  // became unreadable to every other browser the document was shared with.
-  // The learner key still partitions runtime sessions, which are genuinely
-  // per-learner state. Production replaces this module with real session
-  // verification and derives both from server-controlled claims.
-  return { key: SHARED_ASSET_PRINCIPAL, ...(learnerKey ? { learnerKey } : {}) };
+  // 个人部署选项：访问码 cookie（经站点门禁签发）等价放行
+  if (verifyAccessCookie(accessCookie)) {
+    return { key: SHARED_ASSET_PRINCIPAL, ...(learnerKey ? { learnerKey } : {}) };
+  }
+
+  return undefined;
 }
 
 export function authenticatePersistenceHeaders(headers: Headers): PersistencePrincipal | undefined {
   return authenticatePersistenceCredentials(
     headers.get('authorization') ?? undefined,
     headers.get('x-learner-key') ?? undefined,
+    readCookie(headers.get('cookie'), ACCESS_COOKIE),
   );
 }
 
@@ -66,5 +110,6 @@ export async function authenticatePersistenceRequest(
   return authenticatePersistenceCredentials(
     singleHeader(req.headers.authorization),
     singleHeader(req.headers['x-learner-key']),
+    readCookie(singleHeader(req.headers.cookie), ACCESS_COOKIE),
   );
 }
