@@ -9,8 +9,10 @@
 
 import { createLogger } from '@/lib/logger';
 import { primeAudioOnFirstGesture } from '@/lib/utils/audio-unlock';
-import { getAssetPool } from '@/lib/media/asset-pool';
-import { isBrowserPersistenceEnabled } from '@/lib/persistence/bootstrap';
+import {
+  isBrowserPersistenceEnabled,
+  getPersistenceRequestHeaders,
+} from '@/lib/persistence/bootstrap';
 
 const log = createLogger('AudioPlayer');
 
@@ -119,16 +121,34 @@ export class AudioPlayer {
       if (requestToken !== this.requestToken) return false;
       audioLog?.push({ t: Date.now(), kind: 'dexie-result', found: !!blob, size: blob?.size ?? 0 });
 
-      // Server-backed pool: the store resolves the ref by fetching the bytes
-      // (with its auth headers) and handing back an object URL. Hand that URL
-      // straight to the media element — fetch() cannot load blob: URLs on
-      // WebKit (every iOS browser), which silently skipped narration there.
-      let poolUrl: string | undefined;
+      // Server-backed pool: fetch the bytes over HTTP with the persistence
+      // auth headers and re-type them as audio. Two WebKit traps make the
+      // obvious paths fail on iPad: fetch() cannot load blob: URLs, and a
+      // blob typed with the server's octet-stream content-type is refused by
+      // the media element (NotSupportedError) even though desktop plays it.
       if (!blob && isBrowserPersistenceEnabled()) {
-        const pooled = await getAssetPool().resolve(audioId);
+        // WebKit quirks, iPad playback: fetch(blob:) is unsupported, and a blob
+        // typed application/octet-stream (the server's content-type) is refused
+        // by the media element with NotSupportedError. Fetch the bytes over
+        // HTTP ourselves and re-type them as audio — the same shape as the
+        // settings TTS preview, which plays fine on iOS.
+        const authHeaders = await getPersistenceRequestHeaders();
+        const response = await fetch(`/api/persistence/assets/${audioId}/content`, {
+          headers: authHeaders,
+        });
         if (requestToken !== this.requestToken) return false;
-        poolUrl = pooled ?? undefined;
-        audioLog?.push({ t: Date.now(), kind: 'pool-result', found: !!poolUrl, url: poolUrl?.slice(0, 50) });
+        if (response.ok) {
+          const bytes = await response.arrayBuffer();
+          if (bytes.byteLength > 0) {
+            blob = new Blob([bytes], { type: 'audio/mpeg' });
+          }
+        }
+        audioLog?.push({
+          t: Date.now(),
+          kind: 'pool-result',
+          status: response.status,
+          bytes: blob?.size ?? 0,
+        });
       }
 
       let directUrl: string | undefined;
@@ -159,7 +179,7 @@ export class AudioPlayer {
         }
       }
 
-      if (!blob && !poolUrl && !directUrl) {
+      if (!blob && !directUrl) {
         // Pre-generated audio does not exist (generation failed), skip silently
         return false;
       }
@@ -174,7 +194,7 @@ export class AudioPlayer {
       // Set audio source
       const blobUrl = blob ? URL.createObjectURL(blob) : undefined;
       this.blobUrl = blobUrl ?? null;
-      this.audio.src = blobUrl ?? poolUrl ?? (directUrl as string);
+      this.audio.src = blobUrl ?? (directUrl as string);
       if (this.muted) this.audio.volume = 0;
       else this.audio.volume = this.volume;
 
@@ -193,7 +213,7 @@ export class AudioPlayer {
       // avoid leaking it for the lifetime of the document.
       try {
         await this.audio.play();
-        audioLog?.push({ t: Date.now(), kind: 'play-ok', src: (poolUrl ?? directUrl ?? 'blob').slice(0, 50) });
+        audioLog?.push({ t: Date.now(), kind: 'play-ok', src: (directUrl ?? 'blob').slice(0, 50) });
       } catch (playError) {
         audioLog?.push({
           t: Date.now(),
