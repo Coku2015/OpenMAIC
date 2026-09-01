@@ -666,7 +666,9 @@ async function generateAzureTTS(
     headers: {
       'Ocp-Apim-Subscription-Key': config.apiKey!,
       'Content-Type': 'application/ssml+xml; charset=utf-8',
-      'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
+      // 24 kHz 标准采样率：iPad/手机 WebKit 解码器对 16 kHz 低采样率 MP3
+      // (MPEG-2 LSF) 会报 NotSupportedError，桌面端却能播放
+      'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3',
     },
     body: ssml,
     signal,
