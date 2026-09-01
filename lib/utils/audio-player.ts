@@ -116,9 +116,10 @@ export class AudioPlayer {
     // ── 候选源按优先级依次尝试，第一个成功者生效 ──
     const sources: { label: string; src: string; revoke?: () => void }[] = [];
 
-    // 1) 服务器现取现用：新内存 Blob（与设置页试听同款形态，iOS WebKit 实测可播）。
-    //    优先于 IndexedDB 读回的 Blob——iOS 从 IDB 读回的 Blob 交给媒体元素时
-    //    会以 NotSupportedError 拒播（WebKit 老缺陷），桌面端无此问题。
+    // 1) 服务器现取字节 → 全新内存 Blob：与设置页试听完全同款形态，
+    //    iPad Chrome 实测可播。IndexedDB 读回的 Blob 在 iOS WebKit 上会
+    //    NotSupportedError，直连 URL 的 octet-stream 类型同样被拒——
+    //    所以这两者都不作为首选。
     if (isBrowserPersistenceEnabled()) {
       try {
         const authHeaders = await getPersistenceRequestHeaders();
@@ -131,20 +132,20 @@ export class AudioPlayer {
           if (bytes.byteLength > 0) {
             const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
             sources.push({
-              label: `服务器字节(${bytes.byteLength}B)`,
+              label: `服务器音频(${bytes.byteLength}B)`,
               src: url,
               revoke: () => URL.revokeObjectURL(url),
             });
           }
         }
-        diagLog(`服务器: HTTP ${response.status}, ${sources.length ? '有音频' : '无'}`);
+        diagLog(`服务器音频: HTTP ${response.status}, ${sources.length ? '已获取' : '无'}`);
         audioLog?.push({ t: Date.now(), kind: 'server-fetch', status: response.status });
       } catch (fetchErr) {
         diagLog(`服务器取回异常: ${String(fetchErr).slice(0, 40)}`);
       }
     }
 
-    // 2) 本地 Dexie 镜像兜底（生成设备/离线场景）。读回的 Blob 统一重打类型。
+    // 2) 本地 Dexie 镜像（生成设备/离线兜底）。读回的 Blob 统一重打标准类型。
     const local = await resolveBytes(audioId);
     if (requestToken !== this.requestToken) return false;
     if (local) {
