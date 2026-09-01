@@ -467,7 +467,8 @@ export async function generateAndStoreTTS(
   for (let i = 0; i < binary.length; i++) {
     bytes[i] = binary.charCodeAt(i);
   }
-  const blob = new Blob([bytes], { type: `audio/${data.format}` });
+  // 'audio/mpeg' 是标准 MIME；'audio/mp3' 会被 iPad WebKit 拒播
+  const blob = new Blob([bytes], { type: 'audio/mpeg' });
   // Measure duration once at store time so video export (#854) can map this
   // clip onto a timeline without re-decoding. null → leave undefined; the audio
   // still persists and plays.
