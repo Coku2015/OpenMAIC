@@ -1,0 +1,46 @@
+/**
+ * 诊断版专用：屏幕实时显示播放器内部状态（iPad 排错用，确认修复后可整体移除）。
+ */
+
+const DIAG_VERSION = 'personal.10';
+const MAX_LINES = 8;
+
+let panel: HTMLDivElement | null = null;
+const lines: string[] = [];
+
+function ensurePanel(): HTMLDivElement | null {
+  if (typeof document === 'undefined') return null;
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'audio-diag-panel';
+    panel.style.cssText = [
+      'position:fixed',
+      'left:8px',
+      'bottom:8px',
+      'z-index:99999',
+      'background:rgba(0,0,0,0.78)',
+      'color:#7CFC00',
+      'font:10px/1.5 monospace',
+      'padding:6px 8px',
+      'border-radius:6px',
+      'pointer-events:none',
+      'white-space:pre',
+      'max-width:70vw',
+    ].join(';');
+    document.body.appendChild(panel);
+  }
+  return panel;
+}
+
+export function diagVersion(): string {
+  return DIAG_VERSION;
+}
+
+export function diagLog(message: string): void {
+  if (typeof document === 'undefined') return;
+  const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  lines.push(`${time} ${message}`);
+  if (lines.length > MAX_LINES) lines.shift();
+  const el = ensurePanel();
+  if (el) el.textContent = [`[诊断 ${DIAG_VERSION}]`, ...lines].join('\n');
+}

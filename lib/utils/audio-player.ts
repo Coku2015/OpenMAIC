@@ -13,6 +13,7 @@ import {
   isBrowserPersistenceEnabled,
   getPersistenceRequestHeaders,
 } from '@/lib/persistence/bootstrap';
+import { diagLog } from '@/lib/utils/playback-diagnostics';
 
 const log = createLogger('AudioPlayer');
 
@@ -116,10 +117,12 @@ export class AudioPlayer {
     // 诊断：记录每次播放请求的解析结果（iPad 排错用，可在控制台查看 __audioLog）
     const audioLog = (window as unknown as { __audioLog?: unknown[] }).__audioLog;
     audioLog?.push({ t: Date.now(), kind: 'resolve', audioId: audioId.slice(0, 30) });
+    diagLog(`播放请求 ${audioId.slice(0, 18)}`);
     try {
       let blob = await resolveBytes(audioId);
       if (requestToken !== this.requestToken) return false;
       audioLog?.push({ t: Date.now(), kind: 'dexie-result', found: !!blob, size: blob?.size ?? 0 });
+    diagLog(`本地镜像: ${blob ? blob.size + 'B' : '无'}`);
 
       // Server-backed pool: fetch the bytes over HTTP with the persistence
       // auth headers and re-type them as audio. Two WebKit traps make the
@@ -149,6 +152,7 @@ export class AudioPlayer {
           status: response.status,
           bytes: blob?.size ?? 0,
         });
+        diagLog(`服务器取回: HTTP ${response.status}, ${blob ? blob.size + 'B' : '无字节'}`);
       }
 
       let directUrl: string | undefined;
@@ -214,6 +218,7 @@ export class AudioPlayer {
       try {
         await this.audio.play();
         audioLog?.push({ t: Date.now(), kind: 'play-ok', src: (directUrl ?? 'blob').slice(0, 50) });
+        diagLog('播放成功');
       } catch (playError) {
         audioLog?.push({
           t: Date.now(),
@@ -221,6 +226,7 @@ export class AudioPlayer {
           name: (playError as { name?: string })?.name ?? 'unknown',
           msg: String((playError as Error)?.message ?? '').slice(0, 80),
         });
+        diagLog(`播放被拒: ${(playError as { name?: string })?.name ?? '未知'}`);
         this.releaseBlobUrl(blobUrl);
         throw playError;
       }
