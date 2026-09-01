@@ -17,11 +17,6 @@ import { diagLog } from '@/lib/utils/playback-diagnostics';
 
 const log = createLogger('AudioPlayer');
 
-/** How long a legacy narration URL fetch may take before the media element
- * fallback takes over. Bounded like the converter's URL probes: one stalled
- * endpoint must not pin a playback line indefinitely. */
-const LEGACY_URL_FETCH_TIMEOUT_MS = 15_000;
-
 /** Bytes an audio id currently resolves to, pool first. Loaded lazily to keep
  * this module importable without the media graph. */
 async function resolveBytes(audioId: string): Promise<Blob | null> {
@@ -114,59 +109,18 @@ export class AudioPlayer {
     const requestToken = ++this.requestToken;
     // A new play supersedes any in-flight legacy fetch of the previous one.
     this.abortLegacyFetch();
-    // 诊断：记录每次播放请求的解析结果（iPad 排错用，可在控制台查看 __audioLog）
     const audioLog = (window as unknown as { __audioLog?: unknown[] }).__audioLog;
     audioLog?.push({ t: Date.now(), kind: 'resolve', audioId: audioId.slice(0, 30) });
     diagLog(`播放请求 ${audioId.slice(0, 18)}`);
-    try {
-      // ── 首选路径（持久化模式）：直连流式播放 ──
-      // 媒体元素直接以 cookie 鉴权（同源自动携带）从服务器流式取音频，
-      // 完全绕开 blob/fetch 在 WebKit 上的两个陷阱（fetch(blob:) 不支持、
-      // octet-stream 类型 blob 被拒播）。iOS 对原生流式播放的兼容性最好。
-      if (isBrowserPersistenceEnabled()) {
-        try {
-          this.stopAudioElement();
-          const stream = new Audio();
-          stream.src = `/api/persistence/assets/${audioId}/content`;
-          stream.volume = this.muted ? 0 : this.volume;
-          stream.defaultPlaybackRate = this.playbackRate;
-          stream.playbackRate = this.playbackRate;
-          stream.addEventListener('ended', () => {
-            if (this.audio === stream) this.audio = null;
-            this.onEndedCallback?.();
-          });
-          this.audio = stream;
-          await stream.play();
-          if (requestToken !== this.requestToken) {
-            stream.pause();
-            return false;
-          }
-          diagLog('直连流式: 播放中');
-          audioLog?.push({ t: Date.now(), kind: 'direct-stream', src: stream.src.slice(0, 60) });
-          return true;
-        } catch (streamError) {
-          if (requestToken !== this.requestToken) return false;
-          diagLog(`直连流式失败(${String(streamError).slice(0, 40)})，降级 blob 路径`);
-          this.stopAudioElement();
-        }
-      }
 
-      let blob = await resolveBytes(audioId);
-      if (requestToken !== this.requestToken) return false;
-      audioLog?.push({ t: Date.now(), kind: 'dexie-result', found: !!blob, size: blob?.size ?? 0 });
-    diagLog(`本地镜像: ${blob ? blob.size + 'B' : '无'}`);
+    // ── 候选源按优先级依次尝试，第一个成功者生效 ──
+    const sources: { label: string; src: string; revoke?: () => void }[] = [];
 
-      // Server-backed pool: fetch the bytes over HTTP with the persistence
-      // auth headers and re-type them as audio. Two WebKit traps make the
-      // obvious paths fail on iPad: fetch() cannot load blob: URLs, and a
-      // blob typed with the server's octet-stream content-type is refused by
-      // the media element (NotSupportedError) even though desktop plays it.
-      if (!blob && isBrowserPersistenceEnabled()) {
-        // WebKit quirks, iPad playback: fetch(blob:) is unsupported, and a blob
-        // typed application/octet-stream (the server's content-type) is refused
-        // by the media element with NotSupportedError. Fetch the bytes over
-        // HTTP ourselves and re-type them as audio — the same shape as the
-        // settings TTS preview, which plays fine on iOS.
+    // 1) 服务器现取现用：新内存 Blob（与设置页试听同款形态，iOS WebKit 实测可播）。
+    //    优先于 IndexedDB 读回的 Blob——iOS 从 IDB 读回的 Blob 交给媒体元素时
+    //    会以 NotSupportedError 拒播（WebKit 老缺陷），桌面端无此问题。
+    if (isBrowserPersistenceEnabled()) {
+      try {
         const authHeaders = await getPersistenceRequestHeaders();
         const response = await fetch(`/api/persistence/assets/${audioId}/content`, {
           headers: authHeaders,
@@ -175,104 +129,78 @@ export class AudioPlayer {
         if (response.ok) {
           const bytes = await response.arrayBuffer();
           if (bytes.byteLength > 0) {
-            blob = new Blob([bytes], { type: 'audio/mpeg' });
+            const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
+            sources.push({
+              label: `服务器字节(${bytes.byteLength}B)`,
+              src: url,
+              revoke: () => URL.revokeObjectURL(url),
+            });
           }
         }
-        audioLog?.push({
-          t: Date.now(),
-          kind: 'pool-result',
-          status: response.status,
-          bytes: blob?.size ?? 0,
-        });
-        diagLog(`服务器取回: HTTP ${response.status}, ${blob ? blob.size + 'B' : '无字节'}`);
+        diagLog(`服务器: HTTP ${response.status}, ${sources.length ? '有音频' : '无'}`);
+        audioLog?.push({ t: Date.now(), kind: 'server-fetch', status: response.status });
+      } catch (fetchErr) {
+        diagLog(`服务器取回异常: ${String(fetchErr).slice(0, 40)}`);
       }
+    }
 
-      let directUrl: string | undefined;
-      if (!blob && legacyUrl) {
-        const controller = new AbortController();
-        this.fetchAbort = controller;
-        const timeout = setTimeout(() => controller.abort(), LEGACY_URL_FETCH_TIMEOUT_MS);
-        try {
-          const response = await fetch(legacyUrl, { signal: controller.signal });
-          const fetched = response.ok ? await response.blob() : null;
-          // Zero-byte responses are not narration: fall back to the URL so a
-          // later attempt can retry, and never play silence.
-          if (fetched && fetched.size > 0) blob = fetched;
-        } catch {
-          blob = null;
-        } finally {
-          clearTimeout(timeout);
-          if (this.fetchAbort === controller) this.fetchAbort = null;
-        }
-        if (requestToken !== this.requestToken) return false;
-        if (!blob) {
-          // A cross-origin legacy URL without CORS headers cannot be fetched,
-          // but a media element is not CORS-bound: hand it the URL directly.
-          // A superseded play never reaches here -- the token check above
-          // already returned false -- so only ordinary fetch/CORS/timeout
-          // failures fall back to the element.
-          directUrl = legacyUrl;
-        }
-      }
+    // 2) 本地 Dexie 镜像兜底（生成设备/离线场景）。读回的 Blob 统一重打类型。
+    const local = await resolveBytes(audioId);
+    if (requestToken !== this.requestToken) return false;
+    if (local) {
+      const normalized = local.type === 'audio/mpeg' ? local : new Blob([local], { type: 'audio/mpeg' });
+      const url = URL.createObjectURL(normalized);
+      sources.push({ label: `本地镜像(${normalized.size}B)`, src: url, revoke: () => URL.revokeObjectURL(url) });
+      diagLog(`本地镜像: ${normalized.size}B`);
+    }
 
-      if (!blob && !directUrl) {
-        // Pre-generated audio does not exist (generation failed), skip silently
-        return false;
-      }
+    // 3) 旧版 audioUrl 兜底（未迁移的历史课件）
+    if (!sources.length && legacyUrl) {
+      sources.push({ label: '旧版链接', src: legacyUrl });
+    }
 
-      // Stop current playback
+    if (!sources.length) {
+      // 没有任何候选源：交由浏览器原生 TTS（如启用）或静默阅读计时
+      diagLog('无候选音频源');
+      return false;
+    }
+
+    for (const source of sources) {
       this.stopAudioElement();
       if (requestToken !== this.requestToken) return false;
 
-      // Create audio element
-      this.audio = new Audio();
-
-      // Set audio source
-      const blobUrl = blob ? URL.createObjectURL(blob) : undefined;
-      this.blobUrl = blobUrl ?? null;
-      this.audio.src = blobUrl ?? (directUrl as string);
-      if (this.muted) this.audio.volume = 0;
-      else this.audio.volume = this.volume;
-
-      // Apply playback rate
+      this.audio = new Audio(source.src);
+      this.audio.volume = this.muted ? 0 : this.volume;
       this.audio.defaultPlaybackRate = this.playbackRate;
       this.audio.playbackRate = this.playbackRate;
-
-      // Set ended callback
       this.audio.addEventListener('ended', () => {
-        this.releaseBlobUrl(blobUrl);
+        source.revoke?.();
         this.onEndedCallback?.();
       });
 
-      // Play. If play() rejects (autoplay policy, decode error, interrupted
-      // load) the 'ended' listener never fires, so revoke the blob URL here to
-      // avoid leaking it for the lifetime of the document.
       try {
         await this.audio.play();
-        audioLog?.push({ t: Date.now(), kind: 'play-ok', src: (directUrl ?? 'blob').slice(0, 50) });
-        diagLog('播放成功');
       } catch (playError) {
-        audioLog?.push({
-          t: Date.now(),
-          kind: 'play-reject',
-          name: (playError as { name?: string })?.name ?? 'unknown',
-          msg: String((playError as Error)?.message ?? '').slice(0, 80),
-        });
-        diagLog(`播放被拒: ${(playError as { name?: string })?.name ?? '未知'}`);
-        this.releaseBlobUrl(blobUrl);
-        throw playError;
+        source.revoke?.();
+        const name = (playError as { name?: string })?.name ?? 'unknown';
+        diagLog(`播放被拒(${source.label}): ${name}`);
+        log.error('Failed to play audio:', playError);
+        continue; // 尝试下一个候选源
       }
       if (requestToken !== this.requestToken) {
-        this.releaseBlobUrl(blobUrl);
+        source.revoke?.();
         return false;
       }
-      // Re-apply after play() — some browsers reset during load
+      // 部分浏览器在加载过程中会重置播放速率
       this.audio.playbackRate = this.playbackRate;
+      diagLog(`播放成功(${source.label})`);
+      audioLog?.push({ t: Date.now(), kind: 'play-ok', source: source.label });
       return true;
-    } catch (error) {
-      log.error('Failed to play audio:', error);
-      throw error;
     }
+
+    diagLog('全部候选源播放失败');
+    audioLog?.push({ t: Date.now(), kind: 'all-sources-failed' });
+    return false;
   }
 
   /**
