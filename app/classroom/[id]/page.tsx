@@ -34,10 +34,11 @@ export default function ClassroomDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 诊断：确认设备加载的是最新前端（随每次补丁发布更新版本号）
+  // 诊断：确认设备加载的前端版本（构建时注入，见 build-push.sh）
   useEffect(() => {
-    void import('sonner').then(({ toast }) =>
-      toast.info('诊断版 personal.7 已加载', { duration: 6000 }),
+    void Promise.all([import('sonner'), import('@/lib/utils/playback-diagnostics')]).then(
+      ([{ toast }, { diagVersion }]) =>
+        toast.info(`前端版本: ${diagVersion()}`, { duration: 8000 }),
     );
   }, []);
 

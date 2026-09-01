@@ -2,7 +2,8 @@
  * 诊断版专用：屏幕实时显示播放器内部状态（iPad 排错用，确认修复后可整体移除）。
  */
 
-const DIAG_VERSION = 'personal.10';
+// 构建时由 NEXT_PUBLIC_BUILD_LABEL 注入（build-push.sh 传入镜像标签），不再硬编码
+const DIAG_VERSION = process.env.NEXT_PUBLIC_BUILD_LABEL?.trim() || 'dev';
 const MAX_LINES = 8;
 
 let panel: HTMLDivElement | null = null;
