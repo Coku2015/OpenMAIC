@@ -34,6 +34,13 @@ export default function ClassroomDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // 诊断：确认设备加载的是最新前端（随每次补丁发布更新版本号）
+  useEffect(() => {
+    void import('sonner').then(({ toast }) =>
+      toast.info('诊断版 personal.7 已加载', { duration: 6000 }),
+    );
+  }, []);
+
   const generationStartedRef = useRef(false);
 
   const { generateRemaining, retrySingleOutline, stop } = useSceneGenerator({

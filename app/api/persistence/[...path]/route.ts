@@ -268,6 +268,18 @@ export async function handlePersistenceRequest(
   request: Request,
   deps: PersistenceRequestDeps = {},
 ): Promise<Response> {
+  // 诊断：记录每个持久化请求的方法/路径/状态（排错期间临时开启）
+  const res = await handlePersistenceRequestInternal(request, deps);
+  console.log(
+    `[persistence] ${new Date().toISOString()} ${request.method} ${routeRelativePath(request)} -> ${res.status}`,
+  );
+  return res;
+}
+
+async function handlePersistenceRequestInternal(
+  request: Request,
+  deps: PersistenceRequestDeps = {},
+): Promise<Response> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
     return jsonError(404, 'PERSISTENCE_NOT_CONFIGURED', 'server persistence not configured');

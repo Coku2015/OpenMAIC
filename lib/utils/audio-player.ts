@@ -111,9 +111,13 @@ export class AudioPlayer {
     const requestToken = ++this.requestToken;
     // A new play supersedes any in-flight legacy fetch of the previous one.
     this.abortLegacyFetch();
+    // 诊断：记录每次播放请求的解析结果（iPad 排错用，可在控制台查看 __audioLog）
+    const audioLog = (window as unknown as { __audioLog?: unknown[] }).__audioLog;
+    audioLog?.push({ t: Date.now(), kind: 'resolve', audioId: audioId.slice(0, 30) });
     try {
       let blob = await resolveBytes(audioId);
       if (requestToken !== this.requestToken) return false;
+      audioLog?.push({ t: Date.now(), kind: 'dexie-result', found: !!blob, size: blob?.size ?? 0 });
 
       // Server-backed pool: the store resolves the ref by fetching the bytes
       // (with its auth headers) and handing back an object URL. Hand that URL
@@ -124,6 +128,7 @@ export class AudioPlayer {
         const pooled = await getAssetPool().resolve(audioId);
         if (requestToken !== this.requestToken) return false;
         poolUrl = pooled ?? undefined;
+        audioLog?.push({ t: Date.now(), kind: 'pool-result', found: !!poolUrl, url: poolUrl?.slice(0, 50) });
       }
 
       let directUrl: string | undefined;
@@ -188,7 +193,14 @@ export class AudioPlayer {
       // avoid leaking it for the lifetime of the document.
       try {
         await this.audio.play();
+        audioLog?.push({ t: Date.now(), kind: 'play-ok', src: (poolUrl ?? directUrl ?? 'blob').slice(0, 50) });
       } catch (playError) {
+        audioLog?.push({
+          t: Date.now(),
+          kind: 'play-reject',
+          name: (playError as { name?: string })?.name ?? 'unknown',
+          msg: String((playError as Error)?.message ?? '').slice(0, 80),
+        });
         this.releaseBlobUrl(blobUrl);
         throw playError;
       }

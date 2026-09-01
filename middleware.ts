@@ -62,6 +62,11 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // 诊断：记录每个 API 请求（排错期间临时开启）
+  if (pathname.startsWith('/api/')) {
+    console.log(`[mw] ${new Date().toISOString()} ${request.method} ${pathname}`);
+  }
+
   // Whitelist: access-code endpoints, health check
   if (pathname.startsWith('/api/access-code/') || pathname === '/api/health') {
     return NextResponse.next();

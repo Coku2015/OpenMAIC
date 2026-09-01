@@ -49,6 +49,7 @@ import { useCanvasStore } from '@/lib/store/canvas';
 import { useSettingsStore } from '@/lib/store/settings';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { createLogger } from '@/lib/logger';
+import { toast } from 'sonner';
 
 const log = createLogger('PlaybackEngine');
 
@@ -643,6 +644,8 @@ export class PlaybackEngine {
               ) {
                 this.playBrowserTTS(speechAction, generation);
               } else {
+                // 诊断：有字幕但没音频字节（资源缺失或未上传到服务器）
+                toast.error(`无音频数据: ${String(speechAction.audioId ?? '无ID').slice(0, 26)}`);
                 scheduleReadingTimer();
               }
             }
@@ -650,6 +653,9 @@ export class PlaybackEngine {
           .catch((err) => {
             if (!this.isCurrentGeneration(generation)) return;
             log.error('TTS error:', err);
+            // 诊断：播放被浏览器拒绝（NotAllowedError=自动播放拦截；NotSupportedError=格式不支持）
+            const errName = (err as { name?: string })?.name ?? 'unknown';
+            toast.error(`音频播放失败: ${errName} ${(err as Error)?.message?.slice(0, 60) ?? ''}`);
             scheduleReadingTimer();
           });
         break;
