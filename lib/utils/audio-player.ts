@@ -107,8 +107,6 @@ export class AudioPlayer {
    */
   public async play(audioId: string, legacyUrl?: string): Promise<boolean> {
     const requestToken = ++this.requestToken;
-    // A new play supersedes any in-flight legacy fetch of the previous one.
-    this.abortLegacyFetch();
     const audioLog = (window as unknown as { __audioLog?: unknown[] }).__audioLog;
     audioLog?.push({ t: Date.now(), kind: 'resolve', audioId: audioId.slice(0, 30) });
     diagLog(`播放请求 ${audioId.slice(0, 18)}`);
@@ -219,9 +217,6 @@ export class AudioPlayer {
    */
   public stop(): void {
     this.requestToken += 1;
-    // Cancel a still-fetching legacy narration instead of waiting for it to
-    // settle: the play was superseded and its result is unwanted.
-    this.abortLegacyFetch();
     this.stopAudioElement();
     // Note: onEndedCallback intentionally NOT cleared here because play()
     // calls stop() internally — clearing would break the callback chain.

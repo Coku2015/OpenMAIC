@@ -37,8 +37,19 @@ export function diagVersion(): string {
   return DIAG_VERSION;
 }
 
+const DIAG_FLAG_KEY = 'maic:audio-diag';
+
+/** 诊断面板默认关闭；在控制台执行 localStorage.setItem('maic:audio-diag','1') 并刷新后开启。 */
+function diagEnabled(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(DIAG_FLAG_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
 export function diagLog(message: string): void {
-  if (typeof document === 'undefined') return;
+  if (typeof document === 'undefined' || !diagEnabled()) return;
   const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   lines.push(`${time} ${message}`);
   if (lines.length > MAX_LINES) lines.shift();
