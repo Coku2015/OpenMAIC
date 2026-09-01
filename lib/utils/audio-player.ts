@@ -13,7 +13,7 @@ import {
   isBrowserPersistenceEnabled,
   getPersistenceRequestHeaders,
 } from '@/lib/persistence/bootstrap';
-import { diagLog } from '@/lib/utils/playback-diagnostics';
+import { diagEnabled, diagLog } from '@/lib/utils/playback-diagnostics';
 
 const log = createLogger('AudioPlayer');
 
@@ -107,8 +107,10 @@ export class AudioPlayer {
    */
   public async play(audioId: string, legacyUrl?: string): Promise<boolean> {
     const requestToken = ++this.requestToken;
-    const audioLog = (window as unknown as { __audioLog?: unknown[] }).__audioLog;
-    audioLog?.push({ t: Date.now(), kind: 'resolve', audioId: audioId.slice(0, 30) });
+    const audioLog = diagEnabled()
+      ? ((window as unknown as { __audioLog?: unknown[] }).__audioLog ??= [])
+      : null;
+    if (audioLog) audioLog.push({ t: Date.now(), kind: 'resolve', audioId: audioId.slice(0, 30) });
     diagLog(`播放请求 ${audioId.slice(0, 18)}`);
 
     // ── 候选源按优先级依次尝试，第一个成功者生效 ──

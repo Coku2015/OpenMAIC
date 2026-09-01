@@ -34,12 +34,14 @@ export default function ClassroomDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 诊断：确认设备加载的前端版本（构建时注入，见 build-push.sh）
+  // 诊断开启时提示设备加载的前端版本（构建时注入，见 build-push.sh）
   useEffect(() => {
-    void Promise.all([import('sonner'), import('@/lib/utils/playback-diagnostics')]).then(
-      ([{ toast }, { diagVersion }]) =>
-        toast.info(`前端版本: ${diagVersion()}`, { duration: 8000 }),
-    );
+    void Promise.all([
+      import('sonner'),
+      import('@/lib/utils/playback-diagnostics'),
+    ]).then(([{ toast }, diag]) => {
+      if (diag.diagEnabled()) toast.info(`前端版本: ${diag.diagVersion()}`, { duration: 8000 });
+    });
   }, []);
 
   const generationStartedRef = useRef(false);
