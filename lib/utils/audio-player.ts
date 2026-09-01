@@ -9,6 +9,8 @@
 
 import { createLogger } from '@/lib/logger';
 import { primeAudioOnFirstGesture } from '@/lib/utils/audio-unlock';
+import { getAssetPool } from '@/lib/media/asset-pool';
+import { isBrowserPersistenceEnabled } from '@/lib/persistence/bootstrap';
 
 const log = createLogger('AudioPlayer');
 
@@ -113,6 +115,17 @@ export class AudioPlayer {
       let blob = await resolveBytes(audioId);
       if (requestToken !== this.requestToken) return false;
 
+      // Server-backed pool: the store resolves the ref by fetching the bytes
+      // (with its auth headers) and handing back an object URL. Hand that URL
+      // straight to the media element — fetch() cannot load blob: URLs on
+      // WebKit (every iOS browser), which silently skipped narration there.
+      let poolUrl: string | undefined;
+      if (!blob && isBrowserPersistenceEnabled()) {
+        const pooled = await getAssetPool().resolve(audioId);
+        if (requestToken !== this.requestToken) return false;
+        poolUrl = pooled ?? undefined;
+      }
+
       let directUrl: string | undefined;
       if (!blob && legacyUrl) {
         const controller = new AbortController();
@@ -141,7 +154,7 @@ export class AudioPlayer {
         }
       }
 
-      if (!blob && !directUrl) {
+      if (!blob && !poolUrl && !directUrl) {
         // Pre-generated audio does not exist (generation failed), skip silently
         return false;
       }
@@ -156,7 +169,7 @@ export class AudioPlayer {
       // Set audio source
       const blobUrl = blob ? URL.createObjectURL(blob) : undefined;
       this.blobUrl = blobUrl ?? null;
-      this.audio.src = blobUrl ?? (directUrl as string);
+      this.audio.src = blobUrl ?? poolUrl ?? (directUrl as string);
       if (this.muted) this.audio.volume = 0;
       else this.audio.volume = this.volume;
 
